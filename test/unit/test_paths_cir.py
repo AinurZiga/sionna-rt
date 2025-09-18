@@ -31,6 +31,7 @@ def test_cir_computation(synthetic_array):
     p_solver = PathSolver()
     paths = p_solver(scene, los=True, specular_reflection=True,
                     diffuse_reflection=False, refraction=False,
+                    diffraction=True, edge_diffraction=True,
                     synthetic_array=synthetic_array)
 
     sampling_frequency = 10**6
@@ -77,6 +78,7 @@ def test_cir_delay_normalization(synthetic_array):
     # Compute paths
     paths = p_solver(scene, los=True, specular_reflection=True,
                     diffuse_reflection=False, refraction=False,
+                    diffraction=True, edge_diffraction=True,
                     synthetic_array=synthetic_array)
     _, tau = paths.cir(normalize_delays=False, out_type="numpy")
     _, tau_norm = paths.cir(normalize_delays=True, out_type="numpy")
@@ -104,10 +106,10 @@ def test_cir_delay_normalization(synthetic_array):
 
 def test_cir_doppler_vs_geometry_updates():
     scene = load_scene(sionna.rt.scene.simple_reflector, merge_shapes=False)
-    scene.add(Transmitter("tx", [-10,0,10]));
-    scene.add(Receiver("rx", [10,0,10]));
+    scene.add(Transmitter("tx", [-10,0,10]))
+    scene.add(Receiver("rx", [10,0,10]))
     scene.tx_array = PlanarArray(num_cols=1, num_rows=1,
-                                pattern="iso", polarization="V")
+                                 pattern="iso", polarization="V")
     scene.rx_array = scene.tx_array
     v_tx = np.array([3., 0., -3.])
     v_rx = np.array([-3., 0., -3.])
@@ -120,12 +122,13 @@ def test_cir_doppler_vs_geometry_updates():
 
     paths = p_solver(scene, los=True, specular_reflection=True,
                     diffuse_reflection=False, refraction=False,
+                    diffraction=False, edge_diffraction=False,
                     synthetic_array=False)
 
     # Doppler-based time evolution
     sampling_frequency = 10**4
     num_time_steps = 10
-    a, tau = paths.cir(sampling_frequency=sampling_frequency,
+    a, _ = paths.cir(sampling_frequency=sampling_frequency,
                     num_time_steps=num_time_steps,
                     normalize_delays=False, out_type="numpy")
     a = np.squeeze(a)
@@ -135,9 +138,10 @@ def test_cir_doppler_vs_geometry_updates():
     d_rx = v_rx/sampling_frequency
     d_ref = v_ref/sampling_frequency
     a_geo = np.zeros([2,0])
-    for i in range(num_time_steps):
+    for _ in range(num_time_steps):
         paths = p_solver(scene, los=True, specular_reflection=True,
                     diffuse_reflection=False, refraction=False,
+                    diffraction=False, edge_diffraction=False,
                     synthetic_array=False)
         a_geo_, _ = paths.cir(normalize_delays=False, out_type="numpy")
         a_geo_ = np.squeeze(a_geo_, axis=(0,1,2,3))
@@ -191,7 +195,6 @@ def test_cir_reverse_direction(synthetic_array):
     assert np.allclose(tau_ref, tau_r)
 
 def test_aoa_aod():
-
     scene = load_scene(sionna.rt.scene.box)
 
     scene.tx_array = PlanarArray(
@@ -233,6 +236,7 @@ def test_aoa_aod():
             specular_reflection=True,
             diffuse_reflection=False,
             refraction=False,
+            diffraction=False,
             synthetic_array=True,
             seed=1,
         )
@@ -243,18 +247,17 @@ def test_aoa_aod():
         int_types = int_types > 0
         depth = np.sum(int_types, axis=0)
         flip_direction = (-1)**(depth+1)
-        flip_direction = np.expand_dims(flip_direction, axis=1)
 
         theta_r = paths.theta_r.array
         phi_r = paths.phi_r.array
         theta_t = paths.theta_t.array
         phi_t = paths.phi_t.array
 
-        k_tx = r_hat(theta_t, phi_t).numpy().T
-        k_rx = r_hat(theta_r, phi_r).numpy().T
+        k_tx = r_hat(theta_t, phi_t)
+        k_rx = r_hat(theta_r, phi_r)
 
-        d = np.linalg.norm(k_tx - k_rx*flip_direction, axis=1)
-        max_d = np.max(np.abs(d))
+        ktx_dot_krx = dr.dot(k_tx, k_rx).numpy()
+        max_d = np.max(np.abs(ktx_dot_krx - flip_direction))
         assert max_d < 1e-5
 
 @pytest.mark.parametrize("phi",  np.linspace(-np.pi*0.5, np.pi*0.5, 10))

@@ -10,8 +10,8 @@ from typing import Callable, Tuple, List
 
 from scipy.constants import speed_of_light
 
-from sionna.rt.utils import rotation_matrix, spawn_ray_towards,\
-    spectrum_to_matrix_4f, jones_vec_dot
+from sionna.rt.utils import rotation_matrix, jones_vec_dot, \
+    spectrum_to_matrix_4f
 from sionna.rt.antenna_pattern import antenna_pattern_to_world_implicit
 from sionna.rt.constants import InteractionType
 from .paths_buffer import PathsBuffer
@@ -47,35 +47,30 @@ class FieldCalculator:
 
     # pylint: disable=line-too-long
     def __call__(self,
-                 scene : mi.Scene,
-                 wavelength : mi.Float | float,
-                 paths : PathsBuffer,
-                 samples_per_src : int,
-                 src_positions : mi.Point3f,
-                 tgt_positions : mi.Point3f,
-                 src_orientations : mi.Point3f,
-                 tgt_orientations : mi.Point3f,
-                 src_antenna_patterns : List[Callable[[mi.Float,mi.Float], Tuple[mi.Complex2f,mi.Complex2f]]],
-                 tgt_antenna_patterns : List[Callable[[mi.Float,mi.Float], Tuple[mi.Complex2f,mi.Complex2f]]],
-                 specular_reflection : bool,
-                 diffuse_reflection : bool,
-                 refraction : bool):
+                 wavelength: mi.Float | float,
+                 paths: PathsBuffer,
+                 samples_per_src: int,
+                 diffraction: bool,
+                 src_positions: mi.Point3f,
+                 tgt_positions: mi.Point3f,
+                 src_orientations: mi.Point3f,
+                 tgt_orientations: mi.Point3f,
+                 src_antenna_patterns: List[Callable[[mi.Float,mi.Float], Tuple[mi.Complex2f,mi.Complex2f]]],
+                 tgt_antenna_patterns: List[Callable[[mi.Float,mi.Float], Tuple[mi.Complex2f,mi.Complex2f]]],
+                 ):
         r"""
-        Executes the solver
+        Computes the channel coefficients and delays for the given paths
 
-        :param scene: Mitsuba scene
         :param wavelength: Wavelength [m]
         :param paths: Traced paths
         :param samples_per_src: Number of samples per source
+        :param diffraction: If set to `True`, then the diffraction is computed
         :param src_positions: Positions of the sources
         :param tgt_positions: Positions of the targets
         :param src_orientations: Sources orientations specified through three angles [rad] corresponding to a 3D rotation as defined in :eq:`rotation`
         :param tgt_orientations: Targets orientations specified through three angles [rad] corresponding to a 3D rotation as defined in :eq:`rotation`
         :param src_antenna_patterns: Antenna pattern of the sources
         :param tgt_antenna_patterns: Antenna pattern of the targets
-        :param specular_reflection: If set to `True`, then the specularly reflected paths are computed
-        :param diffuse_reflection: If set to `True`, then the diffusely reflected paths are computed
-        :param refraction: If set to `True`, then the refracted paths are computed
 
         :return: Paths buffer with channel coefficients and delays set
         """
@@ -88,11 +83,11 @@ class FieldCalculator:
 
         # Compute the channel impulse response
         with dr.scoped_set_flag(dr.JitFlag.OptimizeLoops, False):
-            self._compute_cir(scene, wavelength, paths, samples_per_src,
-                            src_positions, tgt_positions, src_orientations,
-                            tgt_orientations, src_antenna_patterns,
-                            tgt_antenna_patterns, specular_reflection,
-                            diffuse_reflection, refraction)
+            self._compute_cir(wavelength, paths, samples_per_src,
+                              diffraction,
+                              src_positions, tgt_positions, src_orientations,
+                              tgt_orientations, src_antenna_patterns,
+                              tgt_antenna_patterns)
 
         return paths
 
@@ -121,37 +116,32 @@ class FieldCalculator:
     @dr.syntax
     # pylint: disable=line-too-long
     def _compute_cir(self,
-                     scene : mi.Scene,
-                     wavelength : mi.Float | float,
-                     paths : PathsBuffer,
-                     samples_per_src : int,
-                     src_positions : mi.Point3f,
-                     tgt_positions : mi.Point3f,
-                     src_orientations : mi.Point3f,
-                     tgt_orientations : mi.Point3f,
-                     src_antenna_patterns : List[Callable[[mi.Float,mi.Float], Tuple[mi.Complex2f,mi.Complex2f]]],
-                     tgt_antenna_patterns : List[Callable[[mi.Float,mi.Float], Tuple[mi.Complex2f,mi.Complex2f]]],
-                     specular_reflection : bool,
-                     diffuse_reflection : bool,
-                     refraction : bool):
+                     wavelength: mi.Float | float,
+                     paths: PathsBuffer,
+                     samples_per_src: int,
+                     diffraction_enabled: bool,
+                     src_positions: mi.Point3f,
+                     tgt_positions: mi.Point3f,
+                     src_orientations: mi.Point3f,
+                     tgt_orientations: mi.Point3f,
+                     src_antenna_patterns: List[Callable[[mi.Float,mi.Float], Tuple[mi.Complex2f,mi.Complex2f]]],
+                     tgt_antenna_patterns: List[Callable[[mi.Float,mi.Float], Tuple[mi.Complex2f,mi.Complex2f]]]
+                     ):
         r"""
         Computes the channel coefficients ``a`` and delays ``tau``.
 
-        The paths buffer ``paths`` is updated in-place by adding to it these.
+        The paths buffer ``paths`` is updated in-place.
 
-        :param scene: Mitsuba scene
         :param wavelength: Wavelength [m]
         :param paths: Paths buffer. Updated in-place.
         :param samples_per_src: Number of samples per source
+        :param diffraction_enabled: If set to `True`, then the diffraction is computed
         :param src_positions: Positions of the sources
         :param tgt_positions: Positions of the targets
         :param src_orientations: Sources orientations specified through three angles [rad] corresponding to a 3D rotation as defined in :eq:`rotation`
         :param tgt_orientations: Targets orientations specified through three angles [rad] corresponding to a 3D rotation as defined in :eq:`rotation`
         :param src_antenna_patterns: Antenna pattern of the sources
         :param tgt_antenna_patterns: Antenna pattern of the targets
-        :param specular_reflection: If set to `True`, then the specularly reflected paths are computed
-        :param diffuse_reflection: If set to `True`, then the diffusely reflected paths are computed
-        :param refraction: If set to `True`, then the refracted paths are computed
         """
 
         num_paths = paths.buffer_size
@@ -163,7 +153,8 @@ class FieldCalculator:
         path_tgt_pos = dr.gather(mi.Point3f, tgt_positions,
                                  paths.target_indices)
 
-        # Orientation of sources and targets and correspond to-world transforms
+        # Orientation of sources and targets and corresponding to-world
+        # transforms
         path_src_ort = dr.gather(mi.Point3f, src_orientations,
                                  paths.source_indices)
         src_to_world = rotation_matrix(path_src_ort)
@@ -173,11 +164,6 @@ class FieldCalculator:
 
         # Current depth
         depth = dr.full(mi.UInt, 1, num_paths)
-
-        # Normal to the intersected surface is required to evaluate the radio
-        # material.
-        # Initialized to 0
-        normal = dr.zeros(mi.Normal3f, num_paths)
 
         # Interaction type
         interaction_type = paths.get_interaction_type(1, True)
@@ -220,11 +206,11 @@ class FieldCalculator:
         # Initialized assuming that all the rays initially spawn from the source
         # share the unit sphere equally, i.e., initialized to
         # 4*PI/samples_per_src.
-        # This quantity is also used to account for the fact that path including
-        # a diffuse reflection are sampled during shoot-and-bounce with a
-        # probability defined by the radio material, and that this probability
-        # should be canceled to avoid an undesired weighting that arises from
-        # this sampling.
+        # This quantity is also used to account for the fact that paths
+        # including a diffuse reflection are sampled during shoot-and-bounce
+        # with a probability defined by the radio material, and that this
+        # probability should be canceled to avoid an undesired weighting that
+        # arises from this sampling.
         # This canceling is implemented by scaling the solid-angle by the
         # inverse square-root of the probability of sampling the path.
         solid_angle = dr.full(mi.Float, 4.*dr.pi*dr.rcp(samples_per_src),
@@ -239,6 +225,19 @@ class FieldCalculator:
         # Doppler due to moving objects [Hz]
         doppler = dr.zeros(mi.Float, num_paths)
 
+        # For diffraction, the path length from the diffraction point to the
+        # source (s') and to the target (s)
+        if diffraction_enabled:
+            s, s_prime = self._diffraction_compute_s_s_prime(paths,
+                                                             path_src_pos,
+                                                             path_tgt_pos)
+        else:
+            s, s_prime = 0., 0.
+
+        # Paths involving diffraction require special handling for the spreading
+        # factor calculation
+        has_diffraction = dr.full(mi.Bool, False, num_paths)
+
         # Exclude the non-loop variable `wavelength` to avoid having to
         # trace the loop twice, which is expensive.
         while dr.hint(active, mode=self.loop_mode, exclude=[wavelength]):
@@ -251,6 +250,10 @@ class FieldCalculator:
 
             # Mask indicating if this interaction is a diffuse reflection
             diffuse = active & (interaction_type == InteractionType.DIFFUSE)
+
+            # Flag set to True if this interaction is a diffraction
+            diffraction = active & (interaction_type == InteractionType.DIFFRACTION)
+            has_diffraction |= diffraction
 
             # Next interaction type
             next_interaction_type = paths.get_interaction_type(depth+1,
@@ -268,11 +271,6 @@ class FieldCalculator:
                                     path_tgt_pos,
                                     paths.get_vertex(depth+1, gather_next))
 
-            # Spawn rays
-            ray = spawn_ray_towards(prev_vertex, vertex, normal)
-            si_scene = scene.ray_intersect(ray, ray_flags=mi.RayFlags.Minimal,
-                                           coherent=True, active=active)
-
             # Direction of the scattered wave.
             # Only updated if the path is still active, as we need a valid
             # value after the loop ends to evaluate the receive pattern
@@ -282,17 +280,19 @@ class FieldCalculator:
             length = dr.norm(ko_world)
             ko_world *= dr.rcp(length)
 
+            # Intersected shape
+            shape = paths.get_shape(depth, active)
+            shape = dr.reinterpret_array(mi.ShapePtr, shape)
+
             # Update the fields
             # The solid angle of the ray tube is also updated based on the
             # probability of the interaction event
             e_fields, solid_angle = self._update_field(
-                si_scene, interaction_type, ki_world, ko_world, e_fields,
-                solid_angle, specular_reflection, diffuse_reflection,
-                refraction, active
-            )
+                shape, paths, depth, diffraction_enabled, interaction_type,
+                ki_world, ko_world, e_fields, solid_angle, s, s_prime, active)
 
             # Update the Doppler
-            self._update_doppler_shift(doppler, wavelength, si_scene, ki_world,
+            self._update_doppler_shift(shape, doppler, wavelength, ki_world,
                                        ko_world, active)
 
             # Update the path length
@@ -310,14 +310,15 @@ class FieldCalculator:
             # Prepare for next iteration
             depth += 1
             active &= (depth <= max_depth) & ~next_is_none
-            normal = dr.copy(si_scene.n)
             prev_vertex = dr.copy(vertex)
             vertex = dr.copy(next_vertex)
             ki_world = dr.select(active, ko_world, ki_world)
             interaction_type = dr.copy(next_interaction_type)
 
         # Scaling to apply free-space propagation loss
-        pl_scaling = dr.rcp(ray_tube_length)
+        spreading_factor = dr.select(has_diffraction,
+                                     dr.rcp(dr.sqrt(s*s_prime*(s + s_prime))),
+                                     dr.rcp(ray_tube_length))
 
         # Scaling by wavelength
         wl_scaling = wavelength * dr.rcp(4.*dr.pi)
@@ -333,12 +334,17 @@ class FieldCalculator:
         # a[n][m] corresponds to the channel coefficient for the n^th receiver
         # antenna pattern and m^th transmitter antenna pattern
         a = []
+        valid_a = mi.Bool(False)
         for tgt_pattern in tgt_patterns:
             a.append([])
             for e_field in e_fields:
                 a_ = jones_vec_dot(tgt_pattern, e_field)
-                a_ *= pl_scaling*wl_scaling
+                a_ *= spreading_factor*wl_scaling
+                valid_a |= (dr.abs(a_) > 0.)
                 a[-1].append(a_)
+
+        # Disable paths with 0 contribution
+        paths.valid &= valid_a
 
         # Delay
         tau = path_length*dr.rcp(speed_of_light)
@@ -348,118 +354,197 @@ class FieldCalculator:
         paths.doppler = doppler
 
     def _update_field(self,
-                      si : mi.SurfaceInteraction3f,
-                      interaction_type : mi.UInt,
-                      ki_world : mi.Vector3f,
-                      ko_world : mi.Vector3f,
-                      e_fields : mi.Vector4f,
-                      solid_angle : mi.Float,
-                      specular_reflection : bool,
-                      diffuse_reflection : bool,
-                      refraction : bool,
-                      active : mi.Bool) -> Tuple[mi.Matrix4f, mi.Float]:
+                      shape: mi.ShapePtr,
+                      paths: PathsBuffer,
+                      depth: mi.UInt,
+                      diffraction_enabled: bool,
+                      interaction_type: mi.UInt,
+                      ki_world: mi.Vector3f,
+                      ko_world: mi.Vector3f,
+                      e_fields: mi.Vector4f,
+                      solid_angle: mi.Float,
+                      s: mi.Float,
+                      s_prime: mi.Float,
+                      active: mi.Bool) -> Tuple[mi.Matrix4f, mi.Float]:
         # pylint: disable=line-too-long
         r"""
         Evaluates the radio material and updates the electric field accordingly
 
-        :param si: Information about the interaction of the rays with a surface of the scene
+        :param shape: Intersected shape
+        :param paths: Buffer containing path information
+        :param depth: Current depth/interaction index in the path
+        :param diffraction_enabled: If set to `True`, then the diffraction is computed
         :param interaction_type: Interaction type to evaluate, represented using :data:`~sionna.rt.constants.InteractionType`
         :param ki_world: Directions of propagation of the incident waves in the world frame
         :param ko_world: Directions of propagation of the scattered waves in the world frame
         :param e_fields: Jones vector representing the electric field as a 4D real-valued vector
         :param solid_angle: Ray tube solid angles [sr]
-        :param specular_reflection: If set to `True`, then the specularly reflected paths are computed
-        :param diffuse_reflection: If set to `True`, then the diffusely reflected paths are computed
-        :param refraction: If set to `True`, then the refracted paths are computed
+        :param s: Distance parameter for diffraction calculations
+        :param s_prime: Second distance parameter for diffraction calculations
         :param active: Mask to specify active rays
 
         :return: Updated electric field and updated ray tube solid angle [sr]
         """
 
+        # Radio material of the intersected shape
+        rm = shape.bsdf()
+
+        num_paths = paths.buffer_size
+
+        # Read the wedge geometry
+        if diffraction_enabled:
+            wedges = paths.diffracting_wedges
+
+        # Normal to the intersected surface in the world frame
+        normal_world = paths.get_primitive_props(depth, return_normal=True,
+                                                 return_vertices=False, active=active)
+
+        # Build a surface interaction object and context object to call the
+        # radio material
+        si = dr.zeros(mi.SurfaceInteraction3f, num_paths)
+        ctx = mi.BSDFContext(mode=mi.TransportMode.Importance,
+                             type_mask=0, component=0)
+        # If diffraction is globally disabled, we can avoid runing the related code to
+        # speed up the computation
+        if diffraction_enabled:
+            ctx.component |= InteractionType.DIFFRACTION
+
         # Ensure the normal is oriented in the opposite of the direction of
         # propagation of the incident wave
-        normal_world = si.n * dr.sign(dr.dot(si.n, -ki_world))
+        normal_world *= dr.sign(dr.dot(normal_world, -ki_world))
+        si.n = normal_world
         si.sh_frame.n = normal_world
         si.initialize_sh_frame()
-        si.n = normal_world
 
         # Set `si.wi` to the local direction of propagation of the incident wave
         si.wi = si.to_local(ki_world)
+        # Interaction point
+        si.p = paths.get_vertex(depth, active)
+        # Intersected shape
+        si.shape = shape
+        # Intersected primitive
+        si.prim_index = paths.get_primitive(depth, active)
 
-        # We use `si.prim_index` to store the interaction type, as Mitsuba does
-        # not currently provide a field for this data.
-        # The BSDF is then evaluated for this interaction type.
-        si.prim_index = interaction_type
-
-        # Context. Note used.
-        # Specify the components that are required
-        component = 0
-        if specular_reflection:
-            component |= InteractionType.SPECULAR
-        if diffuse_reflection:
-            component |= InteractionType.DIFFUSE
-        if refraction:
-            component |= InteractionType.REFRACTION
-        ctx = mi.BSDFContext(mode=mi.TransportMode.Importance,
-                             type_mask=0,
-                             component=component)
+        if diffraction_enabled:
+            # `si.dn_du` stores the edge vector in the local frame
+            si.dn_du = si.to_local(wedges.e_hat)
+            # `si.dn_dv` stores the normal to the n-face in the local frame
+            si.dn_dv = si.to_local(wedges.nn)
+        # `si.dp_du` stores the path length from the diffraction point to the
+        # source, target, and the interaction type.
+        si.dp_du = mi.Vector3f(s,
+                               s_prime,
+                               dr.reinterpret_array(mi.Float,
+                                                    interaction_type))
 
         # Probability of the event to be sampled
-        probs = si.bsdf().pdf(ctx, si, ko_world, active)
+        probs = paths.get_prob(depth, active)
         # Scale the solid angle accordingly
-        solid_angle *= dr.rcp(probs)
+        solid_angle[active] *= dr.rcp(probs)
 
         # Update the fields
         for i, e_field in enumerate(e_fields):
-            # We use:
-            #  `si.dn_du` to store the real components of the S and P
-            #       coefficients of the incident field
-            #  `si.dn_dv` to store the imaginary components of the S and P
-            #       coefficients of the incident field
-            #  `si.dp_du` to store the solid angle
-            # Note that the incident field is represented in the implicit world
-            #   frame
-            # Real components
-            si.dn_du = mi.Vector3f(e_field.x, # S
-                                   e_field.y, # P
-                                   0.)
-            # Imag components
-            si.dn_dv = mi.Vector3f(e_field.z, # S
-                                   e_field.w, # P
-                                   0.)
-            # Solid angle
-            si.dp_du = mi.Vector3f(solid_angle, 0., 0.)
+            # `si.duv_dx` and `si.duv_dy` stores the incident field
+            si.duv_dx = mi.Vector2f(e_field.x, # S
+                                    e_field.y) # P
+            si.duv_dy = mi.Vector2f(e_field.z, # S
+                                    e_field.w) # P
+            # `si.t` stores the solid angle
+            si.t = solid_angle
+
             # Evaluate the radio material
-            jones_mat = si.bsdf().eval(ctx, si, ko_world, active)
+            jones_mat = rm.eval(ctx, si, ko_world, active)
             jones_mat = spectrum_to_matrix_4f(jones_mat)
             # Update the field by applying the Jones matrix
             e_fields[i] = dr.select(active, jones_mat@e_field, e_field)
 
         return e_fields, solid_angle
 
+    @dr.syntax
+    def _diffraction_compute_s_s_prime(self,
+                                       paths: PathsBuffer,
+                                       src_positions: mi.Point3f,
+                                       tgt_positions: mi.Point3f
+                                       ) -> Tuple[mi.Float, mi.Float]:
+        r"""
+        Computes the distances s and s' for diffraction calculations
+
+        For each path, this function computes:
+        - s: Total distance from the diffraction point to the target
+        - s': Total distance from the source to the diffraction point
+
+        These distances are used in the diffraction field calculations to
+        determine the appropriate Fresnel diffraction coefficients.
+
+        :param paths: Buffer containing the paths
+        :param src_positions: Positions of the sources
+        :param tgt_positions: Positions of the targets
+
+        :return: s, s_prime -- Distance from diffraction point to target for each
+            path, Distance from source to diffraction point for each path
+        """
+
+        num_paths = paths.buffer_size
+
+        s = dr.zeros(mi.Float, num_paths)
+        s_prime = dr.zeros(mi.Float, num_paths)
+
+        active = dr.full(mi.Bool, True, num_paths)
+        depth = dr.full(mi.UInt, 1, num_paths)
+        max_depth = paths.max_depth
+        prev_vertex = dr.copy(src_positions)
+        post_diffraction = dr.full(mi.Bool, False, num_paths)
+        while dr.hint(active, mode=self.loop_mode):
+
+            interaction_type = paths.get_interaction_type(depth, active)
+
+            diffraction = active & (interaction_type == InteractionType.DIFFRACTION)
+            none = active & (interaction_type == InteractionType.NONE)
+
+            vertex = paths.get_vertex(depth, active)
+            length = dr.norm(vertex - prev_vertex)
+
+            s[post_diffraction & active] += length
+            s_prime[~post_diffraction & active] += length
+
+            post_diffraction |= diffraction
+            prev_vertex = dr.select(active, vertex, prev_vertex)
+            depth += 1
+            active &= (depth <= max_depth) & ~none
+
+        last_segment_length = dr.norm(tgt_positions - prev_vertex)
+        s[post_diffraction] += last_segment_length
+        s_prime[~post_diffraction] += last_segment_length
+
+        return s, s_prime
+
     def _update_doppler_shift(self,
-                              doppler : mi.Float,
-                              wavelength : mi.Float,
-                              si : mi.SurfaceInteraction3f,
-                              ki_world : mi.Vector3f,
-                              ko_world : mi.Vector3f,
-                              active : mi.Bool) -> None:
+                              shape: mi.ShapePtr,
+                              doppler: mi.Float,
+                              wavelength: mi.Float,
+                              ki_world: mi.Vector3f,
+                              ko_world: mi.Vector3f,
+                              active: mi.Bool) -> None:
         r"""
         Updates the Doppler shifts [Hz] of paths by adding the shift due to
-        the interaction ``si``
+        the interaction
 
         The ``doppler`` array is updated in-place.
 
+        :param shape: Intersected shape
         :param doppler: Array of Doppler shifts to update
         :param wavelength: Wavelength [m]
-        :param si: Object containing information about the interaction
         :param ki_world: Direction of propagation of the incident wave
         :param ko_world: Direction of propagation of the scattered wave
         :param active: Flag indicating the active paths
         """
 
+        num_paths = dr.shape(active)[0]
+
         # Velocity vector of the intersected object
-        v_world = si.bsdf().eval_attribute_3("velocity", si, active)
+        v_world = shape.eval_attribute_3("velocity",
+                                         dr.zeros(mi.SurfaceInteraction3f, num_paths),
+                                         active)
 
         # Effective velocity [m/s]
         v_effective = dr.dot(ko_world - ki_world, v_world)

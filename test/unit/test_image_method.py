@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 
+import pytest
+
 import mitsuba as mi
 import numpy as np
 import drjit as dr
@@ -17,7 +19,7 @@ from sionna.rt.path_solvers.image_method import ImageMethod
 # Utilities
 ############################################################
 
-def check_specular_path(source, target, int_types, vertices, normals):
+def check_specular_path(source, target, int_types, vertices, normals, edge_vecs):
     r"""
     Check that all the specular reflection and refraction in a specular chain
     are correctly reflected/refracted.
@@ -56,6 +58,10 @@ def check_specular_path(source, target, int_types, vertices, normals):
         elif int_types[d] == InteractionType.REFRACTION:
             cos_dis = 1. - np.dot(-in_dir, out_dir)
             valid = np.isclose(cos_dis, 0., atol=1e-3)
+        elif int_types[d] == InteractionType.DIFFRACTION:
+            cos_in = np.dot(-in_dir, edge_vecs[d])
+            cos_out = np.dot(out_dir, edge_vecs[d])
+            valid = np.isclose(cos_in, cos_out, atol=1e-2)
         elif int_types[d] == InteractionType.DIFFUSE:
             valid = False # Should not happen
         if not valid:
@@ -66,8 +72,8 @@ def check_specular_path(source, target, int_types, vertices, normals):
 def compute_face_normals(scene):
 
     def normal(p1, p2, p3):
-        n = dr.cross(p2 - p1, p3 - p1)
-        n = dr.normalize(n)
+        n = dr.cross(p2 - p1, p3 - p1).numpy()
+        n /= np.linalg.norm(n)
         return n
 
     face_normals = {}
@@ -78,22 +84,25 @@ def compute_face_normals(scene):
         for i in range(face_count):
             vis = shape.face_indices(i)
             vps = [shape.vertex_position(vi) for vi in vis]
-            n = normal(*vps).numpy()
+            n = normal(*vps)
             face_normals[shape_ind][i] = n[:,0]
 
     return face_normals
 
-def ray_trace(scene, sources, targets, num_samples, max_num_paths, max_depth):
+def ray_trace(scene, sources, targets, num_samples, max_num_paths, max_depth,
+              specular_reflection, diffuse_reflection, diffraction, refraction):
 
     cand_gen = SBCandidateGenerator()
     im = ImageMethod()
 
     paths = cand_gen(scene.mi_scene, sources, targets, num_samples,
                      max_num_paths, max_depth, los=False,
-                     specular_reflection=True, diffuse_reflection=True,
-                     refraction=True, seed=42)
+                     specular_reflection=specular_reflection,
+                     diffuse_reflection=diffuse_reflection,
+                     diffraction=diffraction, edge_diffraction=diffraction,
+                     refraction=refraction, seed=42)
     paths.shrink()
-    paths = im(scene.mi_scene, paths, sources, targets)
+    paths = im(scene.mi_scene, paths, diffraction, True, sources, targets)
     paths.discard_invalid()
     num_paths = paths.buffer_size
 
@@ -115,18 +124,28 @@ def ray_trace(scene, sources, targets, num_samples, max_num_paths, max_depth):
     shapes_ind = paths.shapes.numpy()
     prims_ind = paths.primitives.numpy()
     normals = []
+    edge_vecs = []
     for p in range(num_paths):
         normals.append([])
+        edge_vecs.append([])
         for d in range(max_depth):
             si = shapes_ind[p][d]
             it = int_types[p][d]
             if it == InteractionType.NONE:
                 n = np.array([0., 0., 0.])
+                e = np.array([0., 0., 0.])
+            elif it == InteractionType.DIFFRACTION:
+                n = np.array([0., 0., 0.])
+                wedge = paths.diffracting_wedges
+                e = wedge.e_hat.numpy().T[p]
             else:
+                e = np.array([0., 0., 0.])
                 pi = prims_ind[p][d]
                 n = face_normals[si][pi]
             normals[p].append(n)
+            edge_vecs[p].append(e)
     normals = np.array(normals)
+    edge_vecs = np.array(edge_vecs)
 
     sources = sources.numpy()
     sources = np.transpose(sources, [1, 0])
@@ -136,7 +155,7 @@ def ray_trace(scene, sources, targets, num_samples, max_num_paths, max_depth):
     sources = np.take(sources, src_indices, axis=0)
     targets = np.take(targets, tgt_indices, axis=0)
 
-    return sources, targets, int_types, vertices, normals
+    return sources, targets, int_types, vertices, normals, edge_vecs
 
 def ray_trace_box_scene(scattering_coefficient):
 
@@ -165,7 +184,8 @@ def ray_trace_box_scene(scattering_coefficient):
     max_depth = 5
 
     return ray_trace(scene, sources, targets, num_samples, max_num_paths,
-                     max_depth)
+                     max_depth, specular_reflection=True, diffuse_reflection=True,
+                     diffraction=False, refraction=False)
 
 def ray_trace_box_two_screens_scene(scattering_coefficient_box):
 
@@ -202,7 +222,48 @@ def ray_trace_box_two_screens_scene(scattering_coefficient_box):
     max_depth = 5
 
     return ray_trace(scene, sources, targets, num_samples, max_num_paths,
-                     max_depth)
+                     max_depth, specular_reflection=True, diffuse_reflection=True,
+                     diffraction=False, refraction=True)
+
+def ray_trace_box_one_screen_scene():
+
+    scene = load_scene(rt.scene.box_one_screen, merge_shapes=False)
+
+    sources = mi.Point3f([4., 3],
+                         [1., -2],
+                         [2, 3])
+
+    targets = mi.Point3f([-4., -3],
+                         [1., -1],
+                         [2, 4])
+
+    num_samples = int(1e5)
+    max_num_paths = int(1e6)
+    max_depth = 5
+
+    return ray_trace(scene, sources, targets, num_samples, max_num_paths,
+                     max_depth, specular_reflection=True, diffuse_reflection=False,
+                     diffraction=True, refraction=True)
+
+def ray_trace_box_knife_scene():
+
+    scene = load_scene(rt.scene.box_knife, merge_shapes=False)
+
+    sources = mi.Point3f([4., 3],
+                         [1., -2],
+                         [4, 3])
+
+    targets = mi.Point3f([-4., -3],
+                         [1., -1],
+                         [3, 4])
+
+    num_samples = int(1e5)
+    max_num_paths = int(1e6)
+    max_depth = 5
+
+    return ray_trace(scene, sources, targets, num_samples, max_num_paths,
+                     max_depth, specular_reflection=True, diffuse_reflection=False,
+                     diffraction=True, refraction=False)
 
 ############################################################
 # Unit tests
@@ -213,16 +274,19 @@ def test_specular_chains_specular_reflections():
     Test paths consisting of specular reflections only
     """
 
-    sources, targets, int_types, vertices, normals = ray_trace_box_scene(0.0)
+    sources, targets, int_types, vertices, normals, edge_vecs\
+        = ray_trace_box_scene(0.0)
 
     num_paths = int_types.shape[0]
+    assert num_paths > 0
     for p in range(num_paths):
         ts = int_types[p]
         vs = vertices[p]
         ns = normals[p]
+        es = edge_vecs[p]
         src = sources[p]
         tgt = targets[p]
-        valid = check_specular_path(src, tgt, ts, vs, ns)
+        valid = check_specular_path(src, tgt, ts, vs, ns, es)
         assert valid
 
 def test_specular_chains_specular_reflections_refractions():
@@ -230,17 +294,19 @@ def test_specular_chains_specular_reflections_refractions():
     Test paths consisting of specular reflections and refractions only
     """
 
-    sources, targets, int_types, vertices, normals\
+    sources, targets, int_types, vertices, normals, edge_vecs\
         = ray_trace_box_two_screens_scene(0.0)
 
     num_paths = int_types.shape[0]
+    assert num_paths > 0
     for p in range(num_paths):
         ts = int_types[p]
         vs = vertices[p]
         ns = normals[p]
         src = sources[p]
         tgt = targets[p]
-        v = check_specular_path(src, tgt, ts, vs, ns)
+        es = edge_vecs[p]
+        v = check_specular_path(src, tgt, ts, vs, ns, es)
         assert v
 
 def test_specular_suffixes():
@@ -248,10 +314,11 @@ def test_specular_suffixes():
     Test that specular suffixes are valid
     """
 
-    sources, targets, int_types, vertices, normals\
+    sources, targets, int_types, vertices, normals, edge_vecs\
         = ray_trace_box_two_screens_scene(np.sqrt(0.5))
 
     num_paths = int_types.shape[0]
+    assert num_paths > 0
     max_depth = int_types.shape[1]
     # Depth of the last diffuse reflection
     last_dr = -np.ones(num_paths, dtype='int')
@@ -274,6 +341,7 @@ def test_specular_suffixes():
             int_types[p][d] = int_types[p][d_sc]
             vertices[p][d] = vertices[p][d_sc]
             normals[p][d] = normals[p][d_sc]
+            edge_vecs[p][d] = edge_vecs[p][d_sc]
             d += 1
         while d < max_depth:
             int_types[p][d] = InteractionType.NONE
@@ -288,5 +356,133 @@ def test_specular_suffixes():
         ns = normals[p]
         src = source_sf[p]
         tgt = targets[p]
-        v = check_specular_path(src, tgt, ts, vs, ns)
+        es = edge_vecs[p]
+        v = check_specular_path(src, tgt, ts, vs, ns, es)
         assert v
+
+def test_specular_chains_diffraction_1():
+    r"""
+    Test paths consisting of specular reflections, refractions, and diffraction.
+    Only edge diffraction  is tested.
+    """
+
+    sources, targets, int_types, vertices, normals, edge_vecs\
+        = ray_trace_box_one_screen_scene()
+
+    num_paths = int_types.shape[0]
+    assert num_paths > 0
+    for p in range(num_paths):
+        ts = int_types[p]
+        vs = vertices[p]
+        ns = normals[p]
+        es = edge_vecs[p]
+        src = sources[p]
+        tgt = targets[p]
+        valid = check_specular_path(src, tgt, ts, vs, ns, es)
+        assert valid
+
+def test_specular_chains_diffraction_2():
+    r"""
+    Test paths consisting of specular reflections and diffraction with wedge
+    diffraction.
+    """
+
+    sources, targets, int_types, vertices, normals, edge_vecs\
+        = ray_trace_box_knife_scene()
+
+    num_paths = int_types.shape[0]
+    assert num_paths > 0
+    for p in range(num_paths):
+        ts = int_types[p]
+        vs = vertices[p]
+        ns = normals[p]
+        es = edge_vecs[p]
+        src = sources[p]
+        tgt = targets[p]
+        valid = check_specular_path(src, tgt, ts, vs, ns, es)
+        assert valid
+
+@pytest.mark.parametrize("lit_region", [True, False])
+def test_diffraction_lit_region_flag(lit_region):
+    """
+    Test the diffraction lit region flag
+    """
+
+    EXPECTED_NUM_PATHS = {True : 3, False : 1}
+
+    scene = load_scene(rt.scene.simple_wedge)
+
+    cand_gen = SBCandidateGenerator()
+    im = ImageMethod()
+
+    sources = mi.Point3f([-10, -10, 0])
+    targets = mi.Point3f([[10, -15, 9],
+                          [5, -2, 10],
+                          [0, 0, 0]])
+
+    paths = cand_gen(scene.mi_scene, sources, targets,
+                     samples_per_src=10**3,
+                     max_num_paths_per_src=10**2,
+                     max_depth=1,
+                     los=False,
+                     specular_reflection=False,
+                     diffuse_reflection=False,
+                     diffraction=True,
+                     edge_diffraction=False,
+                     refraction=False,
+                     seed=42)
+    paths.shrink()
+    paths = im(scene.mi_scene,
+               paths,
+               diffraction=True,
+               diffraction_lit_region=lit_region,
+               src_positions=sources,
+               tgt_positions=targets)
+    paths.discard_invalid()
+    num_paths = paths.buffer_size
+
+    assert num_paths == EXPECTED_NUM_PATHS[lit_region]
+
+@pytest.mark.parametrize("lit_region", [True, False])
+def test_edge_diffraction_simple(lit_region):
+    """
+    Test that all paths are found in a simple setup with max_depth = 1
+    """
+
+    EXPECTED_NUM_PATHS = {True : 8, False : 4}
+
+    scene = load_scene(rt.scene.box_one_screen, merge_shapes=False)
+
+    sources = mi.Point3f([-2., 2],
+                         [2.,  2],
+                         [2, 4])
+
+    targets = mi.Point3f([-2., 2],
+                         [-2., -2],
+                         [1, 3])
+
+    cand_gen = SBCandidateGenerator()
+    im = ImageMethod()
+
+    paths = cand_gen(scene.mi_scene, sources, targets,
+                     samples_per_src=10**3,
+                     max_num_paths_per_src=10**2,
+                     max_depth=1,
+                     los=False,
+                     specular_reflection=False,
+                     diffuse_reflection=False,
+                     diffraction=True,
+                     edge_diffraction=True,
+                     refraction=False,
+                     seed=42)
+    paths.shrink()
+    paths = im(scene.mi_scene,
+               paths,
+               diffraction=True,
+               diffraction_lit_region=lit_region,
+               src_positions=sources,
+               tgt_positions=targets)
+    paths.discard_invalid()
+
+    num_paths = paths.buffer_size
+    assert num_paths == EXPECTED_NUM_PATHS[lit_region]

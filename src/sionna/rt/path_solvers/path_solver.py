@@ -142,16 +142,19 @@ class PathSolver:
         self._field_calculator.loop_mode = mode
 
     def __call__(self,
-                 scene : Scene,
-                 max_depth : int = 3,
-                 max_num_paths_per_src : int = 1000000,
-                 samples_per_src : int = 1000000,
-                 synthetic_array : bool = True,
-                 los : bool = True,
-                 specular_reflection : bool = True,
-                 diffuse_reflection : bool = False,
-                 refraction : bool = True,
-                 seed : int = 42) -> Paths:
+                 scene: Scene,
+                 max_depth: int = 3,
+                 max_num_paths_per_src: int = 1000000,
+                 samples_per_src: int = 1000000,
+                 synthetic_array: bool = True,
+                 los: bool = True,
+                 specular_reflection: bool = True,
+                 diffuse_reflection: bool = False,
+                 refraction: bool = True,
+                 diffraction: bool = False,
+                 edge_diffraction: bool = False,
+                 diffraction_lit_region: bool = True,
+                 seed: int = 42) -> Paths:
         # pylint: disable=line-too-long
         r"""
         Executes the solver
@@ -165,6 +168,9 @@ class PathSolver:
         :param specular_reflection: Enables specular reflection
         :param diffuse_reflection: Enables diffuse reflection
         :param refraction: Enables refraction
+        :param diffraction: Enables diffraction
+        :param edge_diffraction: Enables diffraction on free floating edges
+        :param diffraction_lit_region: Enables diffraction in the lit region
         :param seed: Seed
 
         :return: Computed paths
@@ -197,6 +203,8 @@ class PathSolver:
             specular_reflection=specular_reflection,
             diffuse_reflection=diffuse_reflection,
             refraction=refraction,
+            diffraction=diffraction,
+            edge_diffraction=edge_diffraction,
             seed=seed
         )
 
@@ -215,30 +223,26 @@ class PathSolver:
             scene=scene.mi_scene,
             paths=paths_buffer,
             src_positions=src_positions,
-            tgt_positions=tgt_positions
-            )
+            tgt_positions=tgt_positions,
+            diffraction=diffraction,
+            diffraction_lit_region=diffraction_lit_region
+        )
 
         # Compute channel coefficients and delays
         paths_buffer = self._field_calculator(
-            scene=scene.mi_scene,
             wavelength=scene.wavelength,
             paths=paths_buffer,
             samples_per_src=samples_per_src,
+            diffraction=diffraction,
             src_positions=src_positions,
             tgt_positions=tgt_positions,
             src_orientations=src_orientations,
             tgt_orientations=tgt_orientations,
             src_antenna_patterns=src_antenna_patterns,
-            tgt_antenna_patterns=tgt_antenna_patterns,
-            specular_reflection=specular_reflection,
-            diffuse_reflection=diffuse_reflection,
-            refraction=refraction
+            tgt_antenna_patterns=tgt_antenna_patterns
         )
 
         # Discard invalid paths
-        # It was experimentally found that discarding the invalid paths
-        # before re-organizing them into high-dimensional tensors leads to
-        # significant speedups
         paths_buffer.discard_invalid()
 
         # Build the path object

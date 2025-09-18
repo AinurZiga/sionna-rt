@@ -6,26 +6,25 @@
 
 import mitsuba as mi
 import drjit as dr
-from typing import Union, Type
+from typing import Union, Type, Tuple
+import dataclasses
 
 from sionna.rt.constants import InteractionType, INVALID_SHAPE,\
     INVALID_PRIMITIVE
-from sionna.rt.utils import theta_phi_from_unit_vec
+from sionna.rt.utils import theta_phi_from_unit_vec, WedgeGeometry
 
 
-class PathsBuffer:
-    r"""
-    Class used to store the paths during their computation
-
-    The output of a path solver is an instance of this class from which an
-    instance of :class:`~sionna.rt.Paths` is built.
+class PathsBufferBase:
+    """
+    Base class for paths buffer, containing only the fields that need to be
+    read from & written to in the same symbolic loop.
+    When needed, we will create a copy of this object to avoid write-after-read.
 
     :param buffer_size: Size of the buffer
     :param max_depth: Maximum depth
     """
 
-    def __init__(self, buffer_size : int, max_depth : int):
-
+    def __init__(self, buffer_size: int, max_depth: int):
         # Size of the array
         # If `max_depth` is 0, we allocate one element to store paths data
         depth_dim_size = max(1, max_depth)
@@ -34,37 +33,12 @@ class PathsBuffer:
         self._buffer_size = buffer_size
         self._depth_dim_size = depth_dim_size
 
-        # Effective number of paths. This counter should be used to count the
-        # number of paths effectively found by a solver.
-        # Note that the buffer can be shrinked to this value using self.shrink()
-        self._paths_counter = mi.UInt(0)
-
-        # Set to True for if the path is valid
-        self._valid = dr.full(dr.mask_t(mi.Float), False, buffer_size)
-
-        # Index of the source from which the path originates
-        self._src_indices = dr.zeros(mi.UInt, buffer_size)
-
-        # Index of the target to which the path connects to
-        self._tgt_indices = dr.zeros(mi.UInt, buffer_size)
-
-        # Angles of arrival and departure
-        self._theta_t = dr.zeros(mi.Float, buffer_size)
-        self._phi_t = dr.zeros(mi.Float, buffer_size)
-        #
-        self._theta_r = dr.zeros(mi.Float, buffer_size)
-        self._phi_r = dr.zeros(mi.Float, buffer_size)
-
-        # Type of interaction (specular reflection, diffuse reflection, etc)
-        self._interaction_types = dr.full(mi.TensorXu, InteractionType.NONE,
-                                          [buffer_size, depth_dim_size])
-
         # Path vertices
         # The additional two entries along the depth dimension correspond to the
         # endpoints of the paths.
-        self._vertices_x = dr.zeros(mi.TensorXf, [buffer_size,depth_dim_size])
-        self._vertices_y = dr.zeros(mi.TensorXf, [buffer_size,depth_dim_size])
-        self._vertices_z = dr.zeros(mi.TensorXf, [buffer_size,depth_dim_size])
+        self._vertices_x = dr.zeros(mi.TensorXf, [buffer_size, depth_dim_size])
+        self._vertices_y = dr.zeros(mi.TensorXf, [buffer_size, depth_dim_size])
+        self._vertices_z = dr.zeros(mi.TensorXf, [buffer_size, depth_dim_size])
 
         # Pointers to intersected shapes
         # Shapes pointers are stored as unsigned integers
@@ -75,12 +49,29 @@ class PathsBuffer:
         self._primitives = dr.full(mi.TensorXu, INVALID_PRIMITIVE,
                                    [buffer_size, depth_dim_size])
 
-        # Channel inpulse response coefficients and delays are initialized to
-        # `None`
-        self._a = None
-        self._tau = None
-        # Doppler shifts of paths are initialized to `None`
-        self._doppler = None
+        # Used for a workaround required (for now) on the CUDA backend
+        self._tensor_width_lit = dr.width(self._shapes.array)
+        self._tensor_width = dr.opaque(mi.UInt32, self._tensor_width_lit)
+
+
+    @staticmethod
+    def from_paths_buffer(paths: "PathsBuffer"):
+        # pylint: disable=protected-access
+        """
+        Creates a new basic paths buffer from an existing paths buffer by
+        copying the relevant fields.
+        This is useful to avoid reading & writing to the same arrays within
+        a symbolic loop.
+        """
+        result = PathsBufferBase(paths.buffer_size, paths.max_depth)
+        # Note: lazy copies
+        result._vertices_x = dr.copy(paths._vertices_x)
+        result._vertices_y = dr.copy(paths._vertices_y)
+        result._vertices_z = dr.copy(paths._vertices_z)
+        result._shapes = dr.copy(paths._shapes)
+        result._primitives = dr.copy(paths._primitives)
+        return result
+
 
     @property
     def max_depth(self):
@@ -107,6 +98,235 @@ class PathsBuffer:
         :type: :py:class:`int`
         """
         return self._buffer_size
+
+    @property
+    def vertices_x(self):
+        r"""X coordinates of the paths' vertices
+
+        :type: :py:class:`mi.TensorXf [buffer_size, depth_dim_size]`
+        """
+        return self._vertices_x
+
+    @property
+    def vertices_y(self):
+        r"""Y coordinates of the paths' vertices
+
+        :type: :py:class:`mi.TensorXf [buffer_size, depth_dim_size]`
+        """
+        return self._vertices_y
+
+    @property
+    def vertices_z(self):
+        r"""Z coordinates of the paths' vertices
+
+        :type: :py:class:`mi.TensorXf [buffer_size, depth_dim_size]`
+        """
+        return self._vertices_z
+
+    @property
+    def shapes(self):
+        r"""Intersected shapes. Invalid shapes are represented by
+        :data:`~sionna.rt.constants.INVALID_SHAPE`
+
+        :type: :py:class:`mi.TensorXu [buffer_size, depth_dim_size]`
+        """
+        return self._shapes
+
+    @property
+    def primitives(self):
+        r"""Intersected primitives. Invalid primitives are represented by
+        :data:`~sionna.rt.constants.INVALID_PRIMITIVE`.
+
+        :type: :py:class:`mi.TensorXu [buffer_size, depth_dim_size]`
+        """
+        return self._primitives
+
+    def get_vertex(self, depth: mi.UInt, active: mi.Bool) -> mi.Point3f:
+        r"""
+        Gathers the coordinates of the vertices of the paths for the specified
+        ``depth``
+
+        :param depth: Depths
+        :param active: Flags specifying active components
+
+        :return: Coordinates of the paths vertices
+        """
+
+        vx = self._gather_depth(mi.Float, self._vertices_x, depth, active)
+        vy = self._gather_depth(mi.Float, self._vertices_y, depth, active)
+        vz = self._gather_depth(mi.Float, self._vertices_z, depth, active)
+
+        return mi.Point3f(vx, vy, vz)
+
+    def get_shape(self, depth: mi.UInt, active: mi.Bool) -> mi.UInt:
+        r"""
+        Gathers the indices to the intersected shapes for the specified
+        ``depth``
+
+        :param depth: Depths
+        :param active: Flags specifying active components
+
+        :return: Indices of the intersected shapes
+        """
+
+        return self._gather_depth(mi.UInt, self._shapes, depth, active)
+
+    def get_primitive(self, depth: mi.UInt, active: mi.Bool) -> mi.UInt:
+        r"""
+        Gathers the indices to the intersected primitives for the specified
+        ``depth``
+
+        :param depth: Depths
+        :param active: Flags specifying active components
+
+        :return: Indices of the intersected primitives
+        """
+
+        return self._gather_depth(mi.UInt, self._primitives, depth, active)
+
+    def get_primitive_props(self,
+                            depth: mi.UInt,
+                            return_normal: bool,
+                            return_vertices: bool,
+                            active: mi.Bool
+        ) -> mi.Vector3f\
+            | Tuple[mi.Point3f, mi.Point3f, mi.Point3f]\
+            | Tuple[mi.Vector3f, mi.Point3f, mi.Point3f, mi.Point3f]:
+        r"""
+        Gathers primitive properties (normals and/or vertices) for the specified
+        ``depth``
+
+        :param depth: Depths
+        :param return_normal: Whether to return face normals
+        :param return_vertices: Whether to return vertex positions
+        :param active: Flags specifying active components
+
+        :return: Tuple containing requested primitive properties:
+            - Face normal (if return_normal=True)
+            - Vertex positions (if return_vertices=True)
+        """
+
+        valid = active & (depth > 0)
+
+        # Gather shape pointer for the input depth and cast it to a mesh
+        # pointer
+        shape_int = self.get_shape(depth, valid)
+        mesh_ptr = dr.reinterpret_array(mi.MeshPtr, shape_int)
+
+        # Primitive indiex
+        prim_ind = self.get_primitive(depth, valid)
+
+        output = []
+        # Normal
+        if return_normal:
+            normal = mesh_ptr.face_normal(prim_ind, valid)
+            if not return_vertices:
+                return normal
+            output.append(normal)
+        # Vertices
+        if return_vertices:
+            v_ind = mesh_ptr.face_indices(prim_ind, valid)
+            output.append(mesh_ptr.vertex_position(v_ind.x, valid))
+            output.append(mesh_ptr.vertex_position(v_ind.y, valid))
+            output.append(mesh_ptr.vertex_position(v_ind.z, valid))
+        return tuple(output)
+
+    ###############################################
+    # Internal methods
+    ###############################################
+
+    def _gather_depth(self,
+                      dtype: Type[Union[mi.Float, mi.UInt, mi.Bool]],
+                      tensor: mi.TensorXf | mi.TensorXu | mi.TensorXb,
+                      depth: mi.UInt,
+                      active: mi.Bool) -> mi.Float | mi.UInt | mi.Bool:
+        r"""
+        Gathers data from ``tensor`` for the specified ``depth``
+
+        ``tensor`` is assumed to have shape `[buffer_size, depth_dim_size]`.
+
+        :param dtype: Desired output Mitsuba type
+        :param tensor: Tensor to gather from
+        :param depth: Depths
+        :param active: Flags specifying active components
+
+        :return: Gathered values
+        """
+
+        valid = active & (depth > 0)
+
+        ind = dr.arange(mi.UInt, self.buffer_size) * self.depth_dim_size \
+              + depth - 1
+        # Clipping indices should not be required.
+        # Could be removed when the underlying bug in OptiX or DrJit is fixed.
+        assert dr.width(tensor.array) == self._tensor_width_lit
+        ind &= (ind < self._tensor_width)
+
+        return dr.gather(dtype, tensor.array, ind, valid)
+
+
+
+class PathsBuffer(PathsBufferBase):
+    r"""
+    Class used to store the paths during their computation
+
+    The output of a path solver is an instance of this class from which an
+    instance of :class:`~sionna.rt.Paths` is built.
+
+    :param buffer_size: Size of the buffer
+    :param max_depth: Maximum depth
+    :param diffraction: Whether diffraction is enabled
+    """
+
+    def __init__(self, buffer_size: int, max_depth: int, diffraction: bool):
+        super().__init__(buffer_size, max_depth)
+
+        self._diffraction = diffraction
+
+        # Effective number of paths. This counter should be used to count the
+        # number of paths effectively found by a solver.
+        # Note that the buffer can be shrinked to this value using self.shrink()
+        self._paths_counter = mi.UInt(0)
+
+        # Set to True for if the path is valid
+        self._valid = dr.full(dr.mask_t(mi.Float), False, buffer_size)
+
+        # Index of the source from which the path originates
+        self._src_indices = dr.zeros(mi.UInt, buffer_size)
+
+        # Index of the target to which the path connects to
+        self._tgt_indices = dr.zeros(mi.UInt, buffer_size)
+
+        # Angles of arrival and departure
+        self._theta_t = dr.zeros(mi.Float, buffer_size)
+        self._phi_t = dr.zeros(mi.Float, buffer_size)
+        #
+        self._theta_r = dr.zeros(mi.Float, buffer_size)
+        self._phi_r = dr.zeros(mi.Float, buffer_size)
+
+        # Type of interaction (specular reflection, diffuse reflection, etc)
+        self._interaction_types = dr.full(mi.TensorXu, InteractionType.NONE,
+                                          [buffer_size, self.depth_dim_size])
+
+        # Probabilities of the sampled interaction types
+        # These are stored for field computation
+        self._probs = dr.zeros(mi.TensorXf, [buffer_size, self.depth_dim_size])
+
+        # Channel inpulse response coefficients and delays are initialized to
+        # `None`
+        self._a = None
+        self._tau = None
+        # Doppler shifts of paths are initialized to `None`
+        self._doppler = None
+
+        # Diffracting edge properties
+        # As diffraction is only supported for first order, we do not need to
+        # store these properties for each depth.
+        if diffraction:
+            self._diffracting_wedges = \
+                WedgeGeometry.build_with_size(buffer_size)
+        else:
+            self._diffracting_wedges = None
 
     @property
     def paths_counter(self):
@@ -186,46 +406,20 @@ class PathsBuffer:
         return self._interaction_types
 
     @property
-    def vertices_x(self):
-        r"""X coordinates of the paths' vertices
+    def diffracting_wedges(self):
+        r"""Diffracting wedges
+
+        :type: :py:class:`WedgeGeometry`
+        """
+        return self._diffracting_wedges
+
+    @property
+    def probs(self):
+        r"""Probabilities of the sampled interaction types
 
         :type: :py:class:`mi.TensorXf [buffer_size, depth_dim_size]`
         """
-        return self._vertices_x
-
-    @property
-    def vertices_y(self):
-        r"""Y coordinates of the paths' vertices
-
-        :type: :py:class:`mi.TensorXf [buffer_size, depth_dim_size]`
-        """
-        return self._vertices_y
-
-    @property
-    def vertices_z(self):
-        r"""Z coordinates of the paths' vertices
-
-        :type: :py:class:`mi.TensorXf [buffer_size, depth_dim_size]`
-        """
-        return self._vertices_z
-
-    @property
-    def shapes(self):
-        r"""Intersected shapes. Invalid shapes are represented by
-        :data:`~sionna.rt.constants.INVALID_SHAPE`
-
-        :type: :py:class:`mi.TensorXu [buffer_size, depth_dim_size]`
-        """
-        return self._shapes
-
-    @property
-    def primitives(self):
-        r"""Intersected primitives. Invalid primitives are represented by
-        :data:`~sionna.rt.constants.INVALID_PRIMITIVE`.
-
-        :type: :py:class:`mi.TensorXu [buffer_size, depth_dim_size]`
-        """
-        return self._primitives
+        return self._probs
 
     @property
     def a(self):
@@ -234,7 +428,7 @@ class PathsBuffer:
         the ``n`` th receive antenna pattern and the ``m`` th transmit antenna
         pattern
 
-        :type: :py:class:`Tuple[Tuple[mi.Complex2f]]`
+        :type: :py:class:`Tuple[mi.TensorXf, mi.TensorXf]`
         """
         return self._a
 
@@ -266,10 +460,8 @@ class PathsBuffer:
     def doppler(self, v):
         self._doppler = v
 
-
     def schedule(self) -> None:
-        # TODO: let DrJit walk through this class on its own, e.g. w/ @dataclass
-        dr.schedule(
+        arrays = [
             self._max_depth,
             self._buffer_size,
             self._depth_dim_size,
@@ -287,21 +479,25 @@ class PathsBuffer:
             self._vertices_z,
             self._shapes,
             self._primitives,
+            self._probs,
             self._a,
             self._tau,
             self._doppler,
-        )
+        ]
+        if self._diffraction:
+            arrays.append(self._diffracting_wedges)
+        dr.schedule(*arrays)
 
     @dr.syntax
     def add_paths(self,
-                  depth : mi.UInt,
-                  indices : mi.UInt,
-                  sample_data : int,
-                  valid : mi.Bool,
-                  tgt_index : mi.UInt,
-                  k_tx : mi.Vector3f,
-                  k_rx : mi.Vector3f,
-                  active : mi.Bool) -> None:
+                  depth: mi.UInt,
+                  indices: mi.UInt,
+                  sample_data: int,
+                  valid: mi.Bool,
+                  tgt_index: mi.UInt,
+                  k_tx: mi.Vector3f,
+                  k_rx: mi.Vector3f,
+                  active: mi.Bool) -> None:
         # pylint: disable=line-too-long
         r"""
         Adds paths to the buffer
@@ -332,12 +528,17 @@ class PathsBuffer:
         theta_r, phi_r = theta_phi_from_unit_vec(k_rx)
         dr.scatter(self._theta_r, theta_r, indices, active)
         dr.scatter(self._phi_r, phi_r, indices, active)
+        # Diffracting wedge
+        if self._diffraction:
+            dr.scatter(self._diffracting_wedges,
+                       sample_data.diffracting_wedges,
+                       indices, active)
 
         # Only add additional path data if `max_depth > 0`
         d = dr.ones(mi.UInt, dr.width(active))
         while d <= depth:
-            interaction_types, shapes, primitives, vertices\
-                = sample_data.get(d)
+            interaction_types, shapes, primitives, vertices, probs\
+                = sample_data.get(d, active=active)
 
             # Indices for updating the interation type, shape, and primitive
             # arrays
@@ -349,11 +550,13 @@ class PathsBuffer:
             # Update shapes
             dr.scatter(self._shapes.array, shapes, indices_t, active)
             # Update primitives
-            dr.scatter(self._primitives.array, primitives, indices_t,active)
-            # Update interaction types
+            dr.scatter(self._primitives.array, primitives, indices_t, active)
+            # Update vertices
             dr.scatter(self._vertices_x.array, vertices.x, indices_t,active)
             dr.scatter(self._vertices_y.array, vertices.y, indices_t,active)
             dr.scatter(self._vertices_z.array, vertices.z, indices_t,active)
+            # Update probabilities
+            dr.scatter(self._probs.array, probs, indices_t, active)
 
             d += 1
 
@@ -429,8 +632,21 @@ class PathsBuffer:
                        num_paths*depth_dim_size, shrink=True),
             shape=(num_paths, depth_dim_size)
         )
+        if self._diffraction:
+            self._diffracting_wedges = WedgeGeometry(
+            *[dr.reshape(type(getattr(self._diffracting_wedges, field.name)),
+                          getattr(self._diffracting_wedges, field.name),
+                          num_paths, shrink=True)
+                for field in dataclasses.fields(self._diffracting_wedges)])
+        self._probs = mi.TensorXf(
+            dr.reshape(mi.Float, self._probs.array,
+                       num_paths*depth_dim_size, shrink=True),
+            shape=(num_paths, depth_dim_size)
+        )
 
         self._buffer_size = num_paths
+        self._tensor_width_lit = dr.width(self._shapes.array)
+        self._tensor_width = dr.opaque(mi.UInt32, self._tensor_width_lit)
 
     def discard_invalid(self) -> None:
         r"""
@@ -502,11 +718,24 @@ class PathsBuffer:
             dr.gather(mi.UInt, self._primitives.array, tensor_gind),
             shape=(num_valid_paths, depth_dim_size)
         )
+        if self._diffraction:
+            self._diffracting_wedges = dr.gather(
+                WedgeGeometry,
+                self._diffracting_wedges,
+                valid_ind
+            )
+        self._probs = mi.TensorXf(
+            dr.gather(mi.Float, self._probs.array, tensor_gind),
+            shape=(num_valid_paths, depth_dim_size)
+        )
+
         self._buffer_size = num_valid_paths
+        self._tensor_width_lit = dr.width(self._shapes.array)
+        self._tensor_width = dr.opaque(mi.UInt32, self._tensor_width_lit)
 
     def get_interaction_type(self,
-                             depth : mi.UInt,
-                             active : mi.Bool) -> mi.UInt:
+                             depth: mi.UInt,
+                             active: mi.Bool) -> mi.UInt:
         r"""
         Gathers the interactions types for the specified ``depth``
 
@@ -519,73 +748,18 @@ class PathsBuffer:
         return self._gather_depth(mi.UInt, self._interaction_types, depth,
                                   active)
 
-    def get_vertex(self, depth : mi.UInt, active : mi.Bool) -> mi.Point3f:
+
+    def get_prob(self, depth: mi.UInt, active: mi.Bool) -> mi.Float:
         r"""
-        Gathers the coordinates of the vertices of the paths for the specified
-        ``depth``
+        Gathers the probabilities of the sampled interaction types
+        for the specified ``depth``
 
         :param depth: Depths
         :param active: Flags specifying active components
-
-        :return: Coordinates of the paths vertices
         """
+        return self._gather_depth(mi.Float, self._probs, depth, active)
 
-        vx = self._gather_depth(mi.Float, self._vertices_x, depth, active)
-        vy = self._gather_depth(mi.Float, self._vertices_y, depth, active)
-        vz = self._gather_depth(mi.Float, self._vertices_z, depth, active)
-
-        return mi.Point3f(vx, vy, vz)
-
-    def get_shape(self, depth : mi.UInt, active : mi.Bool) -> mi.UInt:
-        r"""
-        Gathers the indices to the intersected shapes for the specified
-        ``depth``
-
-        :param depth: Depths
-        :param active: Flags specifying active components
-
-        :return: Indices of the intersected shapes
-        """
-
-        return self._gather_depth(mi.UInt, self._shapes, depth, active)
-
-    def get_primitive(self, depth : mi.UInt, active : mi.Bool) -> mi.UInt:
-        r"""
-        Gathers the indices to the intersected primitives for the specified
-        ``depth``
-
-        :param depth: Depths
-        :param active: Flags specifying active components
-
-        :return: Indices of the intersected primitives
-        """
-
-        return self._gather_depth(mi.UInt, self._primitives, depth, active)
-
-    def get_normal(self, depth : mi.UInt, active : mi.Bool) -> mi.Vector3f:
-        r"""
-        Gathers the normals at the vertices of the paths for the specified
-        ``depth``
-
-        :param depth: Depths
-        :param active: Flags specifying active components
-
-        :return: Normals at the paths vertices
-        """
-
-        # Gather shape pointer for the input depth and cast it to a mesh
-        # pointer
-        shape_int = self.get_shape(depth, active)
-        mesh_ptr = dr.reinterpret_array(mi.MeshPtr, shape_int)
-
-        # Primitive indiex
-        prim_ind = self.get_primitive(depth, active)
-
-        # Normal
-        normal = mesh_ptr.face_normal(prim_ind, active)
-        return normal
-
-    def set_angles_tx(self, k_tx : mi.Vector3f, active : mi.Bool) -> None:
+    def set_angles_tx(self, k_tx: mi.Vector3f, active: mi.Bool) -> None:
         r"""
         Sets the angles of departure :attr:`~sionna.rt.theta_t`,
         :attr:`~sionna.rt.phi_t` from the directions of departure ``k_tx``
@@ -599,7 +773,7 @@ class PathsBuffer:
         dr.scatter(self._theta_t, theta_t, indices, active)
         dr.scatter(self._phi_t, phi_t, indices, active)
 
-    def set_angles_rx(self, k_rx : mi.Vector3f, active : mi.Bool) -> None:
+    def set_angles_rx(self, k_rx: mi.Vector3f, active: mi.Bool) -> None:
         r"""
         Sets the angles of arrival :attr:`~sionna.rt.theta_r`,
         :attr:`~sionna.rt.phi_r` from the directions of arrival ``k_rx``
@@ -615,9 +789,9 @@ class PathsBuffer:
         dr.scatter(self._phi_r, phi_r, indices, active)
 
     def set_interaction_type(self,
-                             depth : mi.UInt,
-                             value : mi.UInt,
-                             active : mi.Bool) -> None:
+                             depth: mi.UInt,
+                             value: mi.UInt,
+                             active: mi.Bool) -> None:
         # pylint: disable=line-too-long
         r"""
         Sets the interactions types for the specified ``depth``
@@ -630,9 +804,9 @@ class PathsBuffer:
         self._scatter_depth(self._interaction_types, depth, value, active)
 
     def set_vertex(self,
-                   depth : mi.UInt,
-                   value : mi.Point3f,
-                   active : mi.Bool) -> None:
+                   depth: mi.UInt,
+                   value: mi.Point3f,
+                   active: mi.Bool) -> None:
         r"""
         Sets the coordinates of the vertices of the paths for the specified
         ``depth``
@@ -647,9 +821,9 @@ class PathsBuffer:
         self._scatter_depth(self._vertices_z, depth, value.z, active)
 
     def set_shape(self,
-                  depth : mi.UInt,
-                  value : mi.UInt,
-                  active : mi.Bool) -> None:
+                  depth: mi.UInt,
+                  value: mi.UInt,
+                  active: mi.Bool) -> None:
         r"""
         Sets the indices of the intersected shapes for the specified ``depth``
 
@@ -664,9 +838,9 @@ class PathsBuffer:
         self._scatter_depth(self._shapes, depth, value, active)
 
     def set_primitive(self,
-                      depth : mi.UInt,
-                      value : mi.UInt,
-                      active : mi.Bool) -> None:
+                      depth: mi.UInt,
+                      value: mi.UInt,
+                      active: mi.Bool) -> None:
         r"""
         Sets the indices to the intersected primitives for the specified
         ``depth``
@@ -677,6 +851,21 @@ class PathsBuffer:
         """
 
         self._scatter_depth(self._primitives, depth, value, active)
+
+    def set_prob(self,
+                 depth: mi.UInt,
+                 value: mi.Float,
+                 active: mi.Bool) -> None:
+        r"""
+        Sets the probabilities of the sampled interaction types for
+        the specified ``depth``
+
+        :param depth: Depths
+        :param value: Probabilities of the sampled interaction types
+        :param active: Flags specifying active components
+        """
+
+        self._scatter_depth(self._probs, depth, value, active)
 
     def detach_geometry(self) -> None:
         r"""
@@ -691,39 +880,18 @@ class PathsBuffer:
         self._phi_t = dr.detach(self._phi_t)
         self._theta_r = dr.detach(self._theta_r)
         self._phi_r = dr.detach(self._phi_r)
+        if self._diffraction:
+            self._diffracting_wedges = dr.detach(self._diffracting_wedges)
 
     ###############################################
     # Internal methods
     ###############################################
 
-    def _gather_depth(self,
-                      dtype : Type[Union[mi.Float, mi.UInt, mi.Bool]],
-                      tensor : mi.TensorXf | mi.TensorXu | mi.TensorXb,
-                      depth : mi.UInt,
-                      active : mi.Bool) -> mi.Float | mi.UInt | mi.Bool:
-        r"""
-        Gathers data from ``tensor`` for the specified ``depth``
-
-        ``tensor`` is assumed to have shape `[buffer_size, depth_dim_size]`.
-
-        :param dtype: Desired output Mitsuba type
-        :param tensor: Tensor to gather from
-        :param depth: Depths
-        :param active: Flags specifying active components
-
-        :return: Gathered values
-        """
-
-        ind = dr.arange(mi.UInt, self.buffer_size)*self.depth_dim_size\
-                    + depth - 1
-        t = dr.gather(dtype, tensor.array, ind, active)
-        return t
-
     def _scatter_depth(self,
-                       tensor : mi.TensorXf | mi.TensorXu | mi.TensorXb,
-                       depth : mi.UInt,
-                       value : mi.Float | mi.UInt | mi.Bool,
-                       active : mi.Bool) -> None:
+                       tensor: mi.TensorXf | mi.TensorXu | mi.TensorXb,
+                       depth: mi.UInt,
+                       value: mi.Float | mi.UInt | mi.Bool,
+                       active: mi.Bool) -> None:
         r"""
         Sets the items of ``tensor`` to ``value`` for the specified ``depth``
 
@@ -735,6 +903,7 @@ class PathsBuffer:
         :param active: Flags specifying active components
         """
 
-        ind = dr.arange(mi.UInt, self.buffer_size)*self.depth_dim_size\
-                    + depth - 1
-        dr.scatter(tensor.array, value, ind, active)
+        valid = active & (depth > 0)
+        ind = dr.arange(mi.UInt, self.buffer_size) * self.depth_dim_size \
+              + depth - 1
+        dr.scatter(tensor.array, value, ind, valid)

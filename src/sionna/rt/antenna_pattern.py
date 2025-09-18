@@ -327,9 +327,9 @@ class AntennaPattern(ABC):
 
     def compute_gain(
         self,
-        polarization_direction: int=0,
-        num_samples: int=1000,
-        verbose: bool=True
+        polarization_direction: int = 0,
+        num_samples: int = 1000,
+        verbose: bool = True
     ) -> Tuple[mi.Float, mi.Float, mi.Float]:
         # pylint: disable=line-too-long
         r"""
@@ -397,7 +397,7 @@ class AntennaPattern(ABC):
 
     def show(
         self,
-        polarization_direction: int=0,
+        polarization_direction: int = 0,
     ) -> Tuple[plt.Figure, plt.Figure, plt.Figure]:
         # pylint: disable=line-too-long
         r"""
@@ -610,11 +610,11 @@ for s in ["iso", "dipole", "hw_dipole", "tr38901"]:
 ####################################################
 
 def antenna_pattern_to_world_implicit(
-    pattern : Callable[[mi.Float, mi.Float],
+    pattern: Callable[[mi.Float, mi.Float],
                        Tuple[mi.Complex2f, mi.Complex2f]],
-    to_world : mi.Matrix3f,
-    k_world : mi.Vector3f,
-    direction : str
+    to_world: mi.Matrix3f,
+    k_world: mi.Vector3f,
+    direction: str
 ) -> mi.Vector4f:
     r"""
     Evaluates an antenna pattern for a given direction and
@@ -708,8 +708,8 @@ def antenna_pattern_to_world_implicit(
     return f
 
 def complex2real_antenna_pattern(
-    c_theta : mi.Complex2f,
-    c_phi : mi.Complex2f,
+    c_theta: mi.Complex2f,
+    c_phi: mi.Complex2f,
 ) -> Tuple[mi.Vector2f, mi.Vector2f]:
     """
     Converts a complex-valued antenna pattern to

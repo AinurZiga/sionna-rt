@@ -47,7 +47,7 @@ class RadioDevice:
                  position: mi.Point3f,
                  orientation: mi.Point3f | None = None,
                  look_at: mi.Point3f | Self | None = None,
-                 velocity : mi.Vector3f | None = None,
+                 velocity: mi.Vector3f | None = None,
                  color: Tuple[float, float, float] = (0, 0, 0),
                  display_radius: float | None = None):
 
@@ -168,7 +168,7 @@ class RadioDevice:
     @property
     def display_radius(self):
         r"""
-        :py:class:`float | None` : Get/set the radius [m] of the sphere that
+        :py:class:`float | None`: Get/set the radius [m] of the sphere that
         represents this device when displayed in the previewer and renderer.
         If set to `None`, the radius will be chosen automatically using a heuristic.
         """

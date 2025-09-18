@@ -1,46 +1,27 @@
 <scene version="2.1.0">
 
-<!-- Defaults, these can be set via the command line: -Darg=value -->
-
-	<default name="spp" value="4096"/>
-	<default name="resx" value="1920"/>
-	<default name="resy" value="1080"/>
-
-<!-- Camera and Rendering Parameters -->
-
-	<integrator type="path">
-		<integer name="max_depth" value="12"/>
-	</integrator>
-
 <!-- Materials -->
 
-	<bsdf type="twosided" id="mat-itu_concrete">
-		<bsdf type="diffuse">
-			<rgb value="0.603815 0.603815 0.588347" name="reflectance"/>
-		</bsdf>
-	</bsdf>
-	<bsdf type="twosided" id="mat-itu_brick">
-		<bsdf type="diffuse">
-			<rgb value="0.603815 0.090312 0.050031" name="reflectance"/>
-		</bsdf>
+	<bsdf type="itu-radio-material" id="concrete">
+        <string name="type" value="concrete"/>
+        <float name="thickness" value="0.1"/>
 	</bsdf>
 
-<!-- Emitters -->
-
-	<emitter type="constant" id="World">
-		<rgb value="1.017522 1.017522 1.017522" name="radiance"/>
-	</emitter>
+	<bsdf type="itu-radio-material" id="brick">
+        <string name="type" value="brick"/>
+        <float name="thickness" value="0.1"/>
+	</bsdf>
 
 <!-- Shapes -->
 
 	<shape type="ply" id="mesh-floor">
 		<string name="filename" value="meshes/floor.ply"/>
 		<boolean name="face_normals" value="true"/>
-		<ref id="mat-itu_concrete" name="bsdf"/>
+		<ref id="concrete" name="bsdf"/>
 	</shape>
 	<shape type="ply" id="mesh-wall">
 		<string name="filename" value="meshes/wall.ply"/>
 		<boolean name="face_normals" value="true"/>
-		<ref id="mat-itu_brick" name="bsdf"/>
+		<ref id="brick" name="bsdf"/>
 	</shape>
 </scene>

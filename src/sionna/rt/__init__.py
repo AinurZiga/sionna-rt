@@ -6,7 +6,7 @@
 
 # pylint: disable=wrong-import-position
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 import importlib
 
@@ -26,7 +26,7 @@ from .antenna_pattern import AntennaPattern, \
 from .antenna_array import AntennaArray, PlanarArray
 from .camera import Camera
 from .radio_devices import Transmitter, Receiver, RadioDevice
-from .scene import Scene, load_scene
+from .scene import Scene, load_scene, load_scene_from_string
 from .radio_materials import *
 from .constants import InteractionType,\
                        DEFAULT_FREQUENCY,\

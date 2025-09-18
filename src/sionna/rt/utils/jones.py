@@ -11,7 +11,7 @@ from .geometry import theta_phi_from_unit_vec, theta_hat
 from .misc import isclose
 
 
-def implicit_basis_vector(k : mi.Vector3f) -> mi.Vector3f:
+def implicit_basis_vector(k: mi.Vector3f) -> mi.Vector3f:
     # pylint: disable=line-too-long
     r"""
     Returns a reference frame basis vector for a Jones vector, representing a
@@ -30,9 +30,9 @@ def implicit_basis_vector(k : mi.Vector3f) -> mi.Vector3f:
     return v
 
 def jones_matrix_rotator(
-    k : mi.Vector3f,
-    s_current : mi.Vector3f,
-    s_target : mi.Vector3f
+    k: mi.Vector3f,
+    s_current: mi.Vector3f,
+    s_target: mi.Vector3f
 ) -> mi.Matrix2f:
     r"""
     Constructs the 2D change-of-basis matrix to rotate the reference frame of
@@ -52,7 +52,7 @@ def jones_matrix_rotator(
                            [-s, c]])
     return rotator
 
-def jones_matrix_rotator_flip_forward(k : mi.Vector3f) -> mi.Matrix2f:
+def jones_matrix_rotator_flip_forward(k: mi.Vector3f) -> mi.Matrix2f:
     # pylint: disable=line-too-long
     r"""
     Constructs the 2D change-of-basis matrix that flips the direction of
@@ -98,8 +98,8 @@ def jones_matrix_rotator_flip_forward(k : mi.Vector3f) -> mi.Matrix2f:
     return rotator
 
 def to_world_jones_rotator(
-    to_world : mi.Matrix3f,
-    k_local : mi.Vector3f
+    to_world: mi.Matrix3f,
+    k_local: mi.Vector3f
 ) -> mi.Matrix2f:
     # pylint: disable=line-too-long
     r"""
@@ -125,11 +125,11 @@ def to_world_jones_rotator(
     return rotator
 
 def jones_matrix_to_world_implicit(
-    c1 : mi.Complex2f,
-    c2 : mi.Complex2f,
-    to_world : mi.Matrix3f,
-    k_in_local : mi.Vector3f,
-    k_out_local : mi.Vector3f,
+    c1: mi.Complex2f,
+    c2: mi.Complex2f,
+    to_world: mi.Matrix3f,
+    k_in_local: mi.Vector3f,
+    k_out_local: mi.Vector3f,
 ) -> mi.Matrix4f:
     # pylint: disable=line-too-long
     r"""
@@ -247,7 +247,7 @@ def jones_matrix_to_world_implicit(
                       imag[1,0], imag[1,1],  real[1,0],  real[1,1])
     return m4f
 
-def jones_vec_dot(u : mi.Vector4f, v : mi.Vector4f) -> mi.Complex2f:
+def jones_vec_dot(u: mi.Vector4f, v: mi.Vector4f) -> mi.Complex2f:
     # pylint: disable=line-too-long
     r"""
     Computes the dot product of two Jones vectors :math:`\mathbf{u}` and

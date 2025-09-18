@@ -6,3 +6,4 @@ __pycache__/
 *.egg-info/
 .eggs/
 .ipynb_checkpoints
+*.nsys-rep

@@ -2,68 +2,62 @@
 
 <!-- Materials -->
 
-	<bsdf type="twosided" id="mat-itu_glass">
-		<bsdf type="diffuse">
-			<rgb value="0.212230 0.564711 0.799103" name="reflectance"/>
-		</bsdf>
+	<bsdf type="itu-radio-material" id="glass">
+        <string name="type" value="glass"/>
+        <float name="thickness" value="0.1"/>
 	</bsdf>
-	<bsdf type="twosided" id="mat-itu_wood">
-		<bsdf type="diffuse">
-			<rgb value="0.508881 0.168269 0.059511" name="reflectance"/>
-		</bsdf>
+	<bsdf type="itu-radio-material" id="wood">
+        <string name="type" value="wood"/>
+        <float name="thickness" value="0.1"/>
 	</bsdf>
-	<bsdf type="twosided" id="mat-itu_marble">
-		<bsdf type="diffuse">
-			<rgb value="0.701101 0.644479 0.485150" name="reflectance"/>
-		</bsdf>
+	<bsdf type="itu-radio-material" id="marble">
+        <string name="type" value="marble"/>
+        <float name="thickness" value="0.1"/>
 	</bsdf>
-	<bsdf type="twosided" id="mat-itu_brick">
-		<bsdf type="diffuse">
-			<rgb value="0.603827 0.090842 0.049707" name="reflectance"/>
-		</bsdf>
+	<bsdf type="itu-radio-material" id="brick">
+        <string name="type" value="brick"/>
+        <float name="thickness" value="0.1"/>
 	</bsdf>
-	<bsdf type="twosided" id="mat-itu_concrete">
-		<bsdf type="diffuse">
-			<rgb value="0.539479 0.539479 0.539480" name="reflectance"/>
-		</bsdf>
+	<bsdf type="itu-radio-material" id="concrete">
+        <string name="type" value="concrete"/>
+        <float name="thickness" value="0.1"/>
 	</bsdf>
-
 
 <!-- Shapes -->
 
 	<shape type="ply" id="mesh-building_1">
 		<string name="filename" value="meshes/building_1.ply"/>
 		<boolean name="face_normals" value="true"/>
-		<ref id="mat-itu_glass" name="bsdf"/>
+		<ref id="glass" name="bsdf"/>
 	</shape>
 	<shape type="ply" id="mesh-building_6">
 		<string name="filename" value="meshes/building_6.ply"/>
 		<boolean name="face_normals" value="true"/>
-		<ref id="mat-itu_wood" name="bsdf"/>
+		<ref id="wood" name="bsdf"/>
 	</shape>
 	<shape type="ply" id="mesh-building_5">
 		<string name="filename" value="meshes/building_5.ply"/>
 		<boolean name="face_normals" value="true"/>
-		<ref id="mat-itu_glass" name="bsdf"/>
+		<ref id="glass" name="bsdf"/>
 	</shape>
 	<shape type="ply" id="mesh-building_4">
 		<string name="filename" value="meshes/building_4.ply"/>
 		<boolean name="face_normals" value="true"/>
-		<ref id="mat-itu_marble" name="bsdf"/>
+		<ref id="marble" name="bsdf"/>
 	</shape>
 	<shape type="ply" id="mesh-building_3">
 		<string name="filename" value="meshes/building_3.ply"/>
 		<boolean name="face_normals" value="true"/>
-		<ref id="mat-itu_marble" name="bsdf"/>
+		<ref id="marble" name="bsdf"/>
 	</shape>
 	<shape type="ply" id="mesh-building_2">
 		<string name="filename" value="meshes/building_2.ply"/>
 		<boolean name="face_normals" value="true"/>
-		<ref id="mat-itu_brick" name="bsdf"/>
+		<ref id="brick" name="bsdf"/>
 	</shape>
 	<shape type="ply" id="mesh-floor">
 		<string name="filename" value="meshes/floor.ply"/>
 		<boolean name="face_normals" value="true"/>
-		<ref id="mat-itu_concrete" name="bsdf"/>
+		<ref id="concrete" name="bsdf"/>
 	</shape>
 </scene>

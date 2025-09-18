@@ -30,7 +30,7 @@ class AntennaArray:
         and share the same position.
     """
     def __init__(self,
-                 antenna_pattern : AntennaPattern,
+                 antenna_pattern: AntennaPattern,
                  normalized_positions: mi.Point3f):
         self.antenna_pattern = antenna_pattern
         self.normalized_positions = normalized_positions
@@ -156,12 +156,12 @@ class PlanarArray(AntennaArray):
         Name of a registered polarization
         :list-registry:`sionna.rt.antenna_pattern.polarization_registry`
 
-    polarization_model : :py:class:`str`
+    polarization_model: :py:class:`str`
         Name of a registered polarization model
         :list-registry:`sionna.rt.antenna_pattern.polarization_model_registry`.
         Defaults to "tr38901_2".
 
-    ** : :py:class:`Any`
+    **kwargs: :py:class:`Any`
         Depending on the chosen antenna pattern, other keyword arguments
         must be provided.
         See the :ref:`Developer Guide <dev_custom_antenna_patterns>` for

@@ -12,3 +12,5 @@ from .misc import *
 from .ray_tracing import *
 from .render import *
 from .meshes import *
+from .wedges import *
+from .hashing import *

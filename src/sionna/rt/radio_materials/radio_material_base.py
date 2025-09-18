@@ -8,6 +8,7 @@ import mitsuba as mi
 import numpy as np
 import matplotlib
 from typing import Tuple
+import weakref
 
 from sionna.rt import scene as scene_module
 
@@ -25,20 +26,20 @@ class RadioMaterialBase(mi.BSDF):
     :param props: Property container storing the parameters required to build the material
     """
 
-    def __init__(self, props : mi.Properties):
+    def __init__(self, props: mi.Properties):
         super().__init__(props)
 
         # Counter indicating how many objects are using `self`
         self._count_using_objects = 0
 
         # Scene object that uses this radio material
-        self._scene = None
+        self._scene: weakref.ref[scene_module.Scene] = lambda: None
 
         # Read color from properties
         color = None
-        if props.has_property('color'):
+        if 'color' in props:
             color = props['color']
-            props.remove_property('color')
+            del props['color']
             color = tuple(color)
         else:
             # If not specified, use an arbitrary value
@@ -54,16 +55,16 @@ class RadioMaterialBase(mi.BSDF):
 
         :type: :class:`~sionna.rt.Scene`
         """
-        return self._scene
+        return self._scene()
 
     @scene.setter
-    def scene(self, scene : mi.Scene):
+    def scene(self, scene: mi.Scene):
         if not isinstance(scene, scene_module.Scene):
             raise ValueError("`scene` must be an instance of Scene")
-        if (self._scene is not None) and (self._scene is not scene):
+        if (self._scene() is not None) and (self._scene() is not scene):
             raise ValueError(f"Radio material ('{self.name}') already used by"
                              " another scene.")
-        self._scene = scene
+        self._scene = weakref.ref(scene)
 
     @property
     def name(self):
@@ -124,11 +125,11 @@ class RadioMaterialBase(mi.BSDF):
     # pylint: disable=unused-argument
     def sample(
         self,
-        ctx : mi.BSDFContext,
-        si : mi.SurfaceInteraction3f,
-        sample1 : mi.Float,
-        sample2 : mi.Point2f,
-        active : bool | mi.Bool = True
+        ctx: mi.BSDFContext,
+        si: mi.SurfaceInteraction3f,
+        sample1: mi.Float,
+        sample2: mi.Point2f,
+        active: bool | mi.Bool = True
     ) -> Tuple[mi.BSDFSample3f, mi.Spectrum]:
         # pylint: disable=line-too-long
         r"""
@@ -173,10 +174,10 @@ class RadioMaterialBase(mi.BSDF):
 
     def eval(
         self,
-        ctx : mi.BSDFContext,
-        si : mi.SurfaceInteraction3f,
-        wo : mi.Vector3f,
-        active : bool | mi.Bool = True
+        ctx: mi.BSDFContext,
+        si: mi.SurfaceInteraction3f,
+        wo: mi.Vector3f,
+        active: bool | mi.Bool = True
     ) -> mi.Spectrum:
         # pylint: disable=line-too-long
         r"""
@@ -205,10 +206,10 @@ class RadioMaterialBase(mi.BSDF):
 
     def pdf(
         self,
-        ctx : mi.BSDFContext,
-        si : mi.SurfaceInteraction3f,
-        wo : mi.Vector3f,
-        active : bool | mi.Bool = True
+        ctx: mi.BSDFContext,
+        si: mi.SurfaceInteraction3f,
+        wo: mi.Vector3f,
+        active: bool | mi.Bool = True
     ) -> mi.Float:
         # pylint: disable=line-too-long
         r"""
@@ -235,7 +236,7 @@ class RadioMaterialBase(mi.BSDF):
         """
         return ...
 
-    def traverse(self, callback : mi.TraversalCallback):
+    def traverse(self, callback: mi.TraversalCallback):
         # pylint: disable=line-too-long
         r"""
         Traverse the attributes and objects of this instance

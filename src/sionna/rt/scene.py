@@ -11,9 +11,6 @@ from __future__ import annotations
 
 import os
 from importlib_resources import files
-from copy import deepcopy
-import re
-import xml.etree.ElementTree as ET
 from typing import List
 import contextlib
 
@@ -27,16 +24,15 @@ from scipy.constants import speed_of_light, Boltzmann
 import sionna
 from .constants import DEFAULT_FREQUENCY, DEFAULT_BANDWIDTH, \
                        DEFAULT_TEMPERATURE, \
-                       DEFAULT_PREVIEW_BACKGROUND_COLOR, \
-                       DEFAULT_THICKNESS
+                       DEFAULT_PREVIEW_BACKGROUND_COLOR
 from .radio_materials import RadioMaterialBase
-from .scene_object import SceneObject
 from .antenna_array import AntennaArray
 from .camera import Camera
 from .preview import Previewer
-from .renderer import render
-from .utils import radio_map_color_mapping
 from .radio_devices import Transmitter, Receiver
+from .renderer import render
+from .scene_utils import edit_scene_shapes, process_xml
+from .utils import radio_map_color_mapping
 from . import scenes
 
 
@@ -68,7 +64,8 @@ class Scene:
     :param mi_scene: A Mitsuba scene
     """
 
-    def __init__(self, mi_scene: mi.Scene | None=None):
+    def __init__(self, mi_scene: mi.Scene | None = None,
+                 remove_duplicate_vertices: bool = False):
 
         # Transmitter antenna array
         self._tx_array = None
@@ -110,12 +107,12 @@ class Scene:
         # instantiated when loading the Mitsuba scene.
         # Note that when the radio material is instantiated, it is added
         # to the this scene.
-        self._load_scene_objects()
+        self._load_scene_objects(remove_duplicate_vertices)
 
     @property
     def frequency(self):
         """
-        :py:class:`mi.Float` : Get/set the carrier frequency [Hz]
+        :py:class:`mi.Float`: Get/set the carrier frequency [Hz]
         """
         return self._frequency
 
@@ -131,14 +128,21 @@ class Scene:
     @property
     def wavelength(self):
         """
-         :py:class:`mi.Float` :  Wavelength [m]
+         :py:class:`mi.Float`:  Wavelength [m]
         """
         return speed_of_light / self.frequency
 
     @property
+    def wavenumber(self):
+        """
+        :py:class:`mi.Float` : Wavenumber [rad/m]
+        """
+        return dr.two_pi / self.wavelength
+
+    @property
     def temperature(self):
         """
-        :py:class:`mi.Float` : Get/set the environment temperature [K].
+        :py:class:`mi.Float`: Get/set the environment temperature [K].
             Used for the computation of
             :attr:`~sionna.rt.Scene.thermal_noise_power`.
         """
@@ -153,7 +157,7 @@ class Scene:
     @property
     def bandwidth(self):
         """
-        :py:class:`mi.Float` : Get/set the transmission bandwidth [Hz].
+        :py:class:`mi.Float`: Get/set the transmission bandwidth [Hz].
             Used for the computation of
             :attr:`~sionna.rt.Scene.thermal_noise_power`.
         """
@@ -168,21 +172,21 @@ class Scene:
     @property
     def thermal_noise_power(self):
         """
-        :py:class:`mi.Float` : Thermal noise power [W]
+        :py:class:`mi.Float`: Thermal noise power [W]
         """
         return self.temperature * Boltzmann * self.bandwidth
 
     @property
     def angular_frequency(self):
         """
-        :py:class:`mi.Float` : Angular frequency [rad/s]
+        :py:class:`mi.Float`: Angular frequency [rad/s]
         """
         return dr.two_pi*self.frequency
 
     @property
     def tx_array(self):
         """
-        :class:`~rt.AntennaArray` : Get/set the antenna array used by
+        :class:`~rt.AntennaArray`: Get/set the antenna array used by
             all transmitters in the scene
         """
         return self._tx_array
@@ -196,7 +200,7 @@ class Scene:
     @property
     def rx_array(self):
         """
-        :class:`~rt.AntennaArray` : Get/set the antenna array used by
+        :class:`~rt.AntennaArray`: Get/set the antenna array used by
             all receivers in the scene
         """
         return self._rx_array
@@ -218,7 +222,7 @@ class Scene:
     @property
     def objects(self):
         """
-        :py:class:`dict`, { "name", :class:`~rt.SceneObject`} : Dictionary
+        :py:class:`dict`, { "name", :class:`~rt.SceneObject`}: Dictionary
             of scene objects
         """
         return dict(self._scene_objects)
@@ -226,7 +230,7 @@ class Scene:
     @property
     def transmitters(self):
         """
-        :py:class:`dict`, { "name", :class:`~rt.Transmitter`} : Dictionary
+        :py:class:`dict`, { "name", :class:`~rt.Transmitter`}: Dictionary
             of transmitters
         """
         return dict(self._transmitters)
@@ -234,7 +238,7 @@ class Scene:
     @property
     def receivers(self):
         """
-        :py:class:`dict`, { "name", :class:`~rt.Receiver`} : Dictionary
+        :py:class:`dict`, { "name", :class:`~rt.Receiver`}: Dictionary
             of receivers
         """
         return dict(self._receivers)
@@ -242,7 +246,7 @@ class Scene:
     @property
     def paths_solver(self):
         """
-        :class:`rt.PathSolverBase` : Get/set the path solver
+        :class:`rt.PathSolverBase`: Get/set the path solver
         """
         return self._paths_solver
 
@@ -363,17 +367,19 @@ class Scene:
 
         # Set the Mitsuba scene to the edited scene
         self._scene = edit_scene_shapes(self, add=add, remove=remove)
+
         # Reset the scene params
         self._scene_params = mi.traverse(self._scene)
 
         # Update the scene objects.
-        # Scene objects are not re-instantiated to keep the instances hold by
-        # the users valid
-        scene_objects = self._scene_objects
+        # Scene objects are not re-instantiated to keep the instances held by
+        # the users valid.
+        scene_objects = dict(self._scene_objects)
         if add is not None:
             if isinstance(add, sionna.rt.SceneObject):
                 add = [add]
-            scene_objects.update({o.name : o for o in add})
+            scene_objects.update({o.name: o for o in add})
+
         self._scene_objects = {}
         for s in self._scene.shapes():
             name = sionna.rt.SceneObject.shape_id_to_name(s.id())
@@ -382,26 +388,27 @@ class Scene:
             obj.mi_mesh = s
             self._add_scene_object(obj)
 
-
         # Reset the preview widget to ensure the preview is redraw
         self.scene_geometry_updated()
 
     def preview(self, *,
-        background: str=DEFAULT_PREVIEW_BACKGROUND_COLOR,
-        clip_at: float | None=None,
-        clip_plane_orientation: tuple[float, float, float]=(0,0,-1),
-        fov: float=45.,
-        paths: sionna.rt.Paths | None=None,
-        radio_map: sionna.rt.PlanarRadioMap | sionna.rt.MeshRadioMap | None=None,
-        resolution: tuple[int, int]=(655, 500),
-        rm_db_scale: bool=True,
-        rm_metric : str ="path_gain",
-        rm_tx: int | str | None=None,
-        rm_vmax: float | None=None,
-        rm_vmin: float | None=None,
-        show_devices: bool=True,
-        show_orientations: bool=False
-    ) -> sionna.rt.preview.Previewer:
+        background: str = DEFAULT_PREVIEW_BACKGROUND_COLOR,
+        clip_at: float | None = None,
+        clip_plane_orientation: tuple[float, float, float] = (0,0,-1),
+        fov: float = 45.,
+        paths: sionna.rt.Paths | None = None,
+        radio_map: sionna.rt.PlanarRadioMap | sionna.rt.MeshRadioMap | None = None,
+        resolution: tuple[int, int] = (655, 500),
+        rm_db_scale: bool = True,
+        rm_metric : str  = "path_gain",
+        rm_tx: int | str | None = None,
+        rm_vmax: float | None = None,
+        rm_vmin: float | None = None,
+        rm_cmap: callable | str | None = None,
+        show_devices: bool = True,
+        show_orientations: bool = False,
+        point_picker: bool = True
+    ) -> None:
         # pylint: disable=line-too-long
         r"""In an interactive notebook environment, opens an interactive 3D viewer of the scene.
 
@@ -456,9 +463,19 @@ class Scene:
             It should be provided in dB if ``rm_db_scale`` is
             set to `True`, or in linear scale otherwise.
 
+        :param rm_cmap: For coverage map visualization, defines the colormap to use.
+            If set to None, then the default colormap is used.
+            If a string is given, it is interpreted as a Matplotlib colormap name.
+            If a callable is given, it is used as a custom colormap function with
+            the same interface as a Matplotlib colormap.
+            Defaults to `None`.
+
         :param show_devices: Show radio devices
 
         :param show_orientations: Show orientation of radio devices
+
+        :param point_picker: Enable picking a point in the scene with
+            alt + click in order to display its coordinates.
         """
         if (self._preview_widget is not None) and (resolution is not None):
             assert isinstance(resolution, (tuple, list)) and len(resolution) == 2
@@ -469,52 +486,56 @@ class Scene:
 
         # Cache the render widget so that we don't need to re-create it
         # every time
-        fig = self._preview_widget
-        needs_reset = fig is not None
+        widget = self._preview_widget
+        needs_reset = widget is not None
         show_paths = paths is not None
         if needs_reset:
-            fig.reset()
+            widget.reset()
         else:
-            fig = Previewer(scene=self,
-                            resolution=resolution,
-                            fov=fov,
-                            background=background)
-            self._preview_widget = fig
+            widget = Previewer(scene=self,
+                               resolution=resolution,
+                               fov=fov,
+                               background=background)
+            self._preview_widget = widget
 
         # Show paths and devices, if required
         if show_paths:
-            fig.plot_paths(paths)
+            widget.plot_paths(paths)
         if show_devices:
-            fig.plot_radio_devices(show_orientations=show_orientations)
+            widget.plot_radio_devices(show_orientations=show_orientations)
         if radio_map is not None:
             if isinstance(radio_map, sionna.rt.MeshRadioMap):
-                fig.plot_mesh_radio_map(
+                widget.plot_mesh_radio_map(
                     radio_map, tx=rm_tx, db_scale=rm_db_scale,
-                    vmin=rm_vmin, vmax=rm_vmax, metric=rm_metric)
+                    vmin=rm_vmin, vmax=rm_vmax, metric=rm_metric,
+                    cmap=rm_cmap)
             else:
-                fig.plot_planar_radio_map(
+                widget.plot_planar_radio_map(
                     radio_map, tx=rm_tx, db_scale=rm_db_scale,
-                    vmin=rm_vmin, vmax=rm_vmax, metric=rm_metric)
-        # Show legend
-        if show_paths or show_devices:
-            fig.show_legend(show_paths=show_paths, show_devices=show_devices)
+                    vmin=rm_vmin, vmax=rm_vmax, metric=rm_metric,
+                    cmap=rm_cmap)
 
         # Clipping
-        fig.set_clipping_plane(offset=clip_at,
-                               orientation=clip_plane_orientation)
+        widget.set_clipping_plane(offset=clip_at,
+                                  orientation=clip_plane_orientation)
+
+        if point_picker:
+            widget.setup_point_picker()
 
         # Update the camera state
         if not needs_reset:
-            fig.center_view()
+            widget.center_view()
 
-        return fig
+        # Display the previewer and its companion widgets
+        widget.display()
+
 
     def render(self, *,
         camera: Camera | str,
         clip_at: float | None = None,
         clip_plane_orientation: tuple[float, float, float] = (0,0,-1),
         envmap: str | None = None,
-        fov: float = 45,
+        fov: float | None = None,
         lighting_scale: float = 1.0,
         num_samples: int = 128,
         paths: sionna.rt.Paths | None = None,
@@ -522,12 +543,14 @@ class Scene:
         resolution: tuple[int, int] = (655, 500),
         return_bitmap: bool = False,
         rm_db_scale: bool = True,
-        rm_metric : str = "path_gain",
+        rm_metric: str = "path_gain",
         rm_show_color_bar: bool = False,
         rm_tx: int | str | None = None,
         rm_vmax: float | None = None,
         rm_vmin: float | None = None,
-        show_devices: bool = True
+        rm_cmap: str | callable | None = None,
+        show_devices: bool = True,
+        show_orientations: bool = False
     ) -> plt.Figure | mi.Bitmap:
         # pylint: disable=line-too-long
         r"""Renders the scene from the viewpoint of a camera or the interactive viewer
@@ -548,7 +571,9 @@ class Scene:
         :param envmap: Path to an environment map image file
             (e.g. in EXR format) to use for scene lighting
 
-        :param fov: Field of view [deg]
+        :param fov: Field of view [deg]. If `None`, the field of view will
+            default to 45 degrees, unless `camera` is set to `"preview"`, in
+            which case the field of view of the preview camera is used.
 
         :param lighting_scale: Scale to apply to the lighting in the scene
             (e.g., from a constant uniform emitter or a given environment map)
@@ -587,18 +612,29 @@ class Scene:
             It should be provided in dB if ``rm_db_scale`` is
             set to `True`, or in linear scale otherwise.
 
+        :param rm_cmap: For coverage map visualization, defines the colormap to use.
+            If set to None, then the default colormap is used.
+            If a string is given, it is interpreted as a Matplotlib colormap name.
+            If a callable is given, it is used as a custom colormap function with
+            the same interface as a Matplotlib colormap.
+            Defaults to `None`.
+
         :param show_devices: Show radio devices
+
+        :param show_orientations: Show orientation of radio devices
         """
         image = render(
             scene=self,
             camera=camera,
             paths=paths,
             show_devices=show_devices,
+            show_orientations=show_orientations,
             clip_at=clip_at,
             clip_plane_orientation=clip_plane_orientation,
             radio_map=radio_map,
             rm_tx=rm_tx,
             rm_db_scale=rm_db_scale,
+            rm_cmap=rm_cmap,
             rm_vmin=rm_vmin,
             rm_vmax=rm_vmax,
             rm_metric=rm_metric,
@@ -662,18 +698,19 @@ class Scene:
         clip_at: float | None=None,
         clip_plane_orientation: tuple[float, float, float]=(0,0,-1),
         envmap: str | None = None,
-        fov: float = 45,
+        fov: float | None = None,
         lighting_scale: float = 1.0,
         num_samples: int = 512,
         paths: sionna.rt.Paths | None = None,
         radio_map: sionna.rt.RadioMap | None = None,
         resolution: tuple[int, int] = (655, 500),
         rm_db_scale: bool=True,
-        rm_metric : str ="path_gain",
+        rm_metric: str ="path_gain",
         rm_tx: int | str | None=None,
         rm_vmin: float | None=None,
         rm_vmax: float | None=None,
-        show_devices: bool=True
+        show_devices: bool=True,
+        show_orientations: bool=True
     ) -> mi.Bitmap:
         # pylint: disable=line-too-long
         r"""Renders the scene from the viewpoint of a camera or the interactive
@@ -698,7 +735,9 @@ class Scene:
         :param envmap: Path to an environment map image file
             (e.g. in EXR format) to use for scene lighting
 
-        :param fov: Field of view [deg]
+        :param fov: Field of view [deg]. If `None`, the field of view will
+            default to 45 degrees, unless `camera` is set to `"preview"`, in
+            which case the field of view of the preview camera is used.
 
         :param lighting_scale: Scale to apply to the lighting in the scene
             (e.g., from a constant uniform emitter or a given environment map)
@@ -734,12 +773,15 @@ class Scene:
             set to `True`, or in linear scale otherwise.
 
         :param show_devices: Show radio devices
+
+        :param show_orientations: Show orientation of radio devices
         """
         image = render(
             scene=self,
             camera=camera,
             paths=paths,
             show_devices=show_devices,
+            show_orientations=show_orientations,
             clip_at=clip_at,
             clip_plane_orientation=clip_plane_orientation,
             radio_map=radio_map,
@@ -769,21 +811,21 @@ class Scene:
     @property
     def mi_scene_params(self):
         r"""
-        :py:class:`mi.SceneParameters` : Mitsuba scene parameters
+        :py:class:`mi.SceneParameters`: Mitsuba scene parameters
         """
         return self._scene_params
 
     @property
     def mi_scene(self):
         r"""
-        :py:class:`mi.Scene` : Mitsuba scene
+        :py:class:`mi.Scene`: Mitsuba scene
         """
         return self._scene
 
     # pylint: disable=line-too-long
     def sources(self,
                 synthetic_array: bool,
-                return_velocities : bool
+                return_velocities: bool
                 ) -> tuple[mi.Point3f, mi.Point3f, mi.Point3f | None, mi.Vector3f | None]:
         r"""
         Builds arrays containing the positions and orientations of the
@@ -809,7 +851,7 @@ class Scene:
     # pylint: disable=line-too-long
     def targets(self,
                 synthetic_array: bool,
-                return_velocities : bool,
+                return_velocities: bool,
                 ) -> tuple[mi.Point3f, mi.Point3f, mi.Point3f | None, mi.Vector3f | None]:
         r"""
         Builds arrays containing the positions and orientations of the targets
@@ -839,7 +881,7 @@ class Scene:
         if self._preview_widget:
             self._preview_widget.redraw_scene_geometry()
 
-    def all_set(self, radio_map : bool) -> None:
+    def all_set(self, radio_map: bool) -> None:
         # pylint: disable=line-too-long
         r"""
         Raises an exception if the scene is not all set for simulations
@@ -870,7 +912,7 @@ class Scene:
         yield
         self._scene = old_scene
 
-    def _load_scene_objects(self):
+    def _load_scene_objects(self, remove_duplicate_vertices: bool):
         """
         Builds Sionna SceneObject instances from the Mistuba scene
         """
@@ -886,7 +928,8 @@ class Scene:
                 raise TypeError('Only triangle meshes are supported')
 
             # Instantiate the scene object
-            scene_object = sionna.rt.SceneObject(mi_mesh=s)
+            scene_object = sionna.rt.SceneObject(mi_mesh=s,
+                                                 remove_duplicate_vertices=remove_duplicate_vertices)
 
             # Add a scene object to the scene
             self._add_scene_object(scene_object)
@@ -905,7 +948,7 @@ class Scene:
         name = scene_object.name
         s_item = self.get(name)
         if s_item is not None:
-            if  s_item is not scene_object:
+            if s_item is not scene_object:
                 raise ValueError(f"Name '{name}' is already used by another item"
                                  " of the scene")
             else:
@@ -937,10 +980,10 @@ class Scene:
         return used
 
     def _endpoints(self,
-                   radio_devices : List[mi.Transmitter | mi.Receiver],
-                   array : AntennaArray,
+                   radio_devices: List[mi.Transmitter | mi.Receiver],
+                   array: AntennaArray,
                    synthetic_array: bool,
-                   return_velocities : bool
+                   return_velocities: bool
                   ) -> tuple[mi.Point3f, mi.Point3f, mi.Point3f | None, mi.Vector3f | None]:
         r"""
         Builds arrays containing the positions and orientations of the
@@ -1017,9 +1060,10 @@ class Scene:
 
         return positions, orientations, rel_ant_positions, velocities
 
-def load_scene(filename: str | None=None,
-               merge_shapes: bool=True,
-               merge_shapes_exclude_regex: str | None=None) -> Scene:
+def load_scene(filename: str | None = None,
+               merge_shapes: bool = True,
+               merge_shapes_exclude_regex: str | None = None,
+               remove_duplicate_vertices: bool = False) -> Scene:
     # pylint: disable=line-too-long
     r"""
     Loads a scene from file
@@ -1034,361 +1078,57 @@ def load_scene(filename: str | None=None,
 
     :param merge_shapes_exclude_regex: Optional regex to exclude shapes from
         merging. Only used if ``merge_shapes`` is set to `True`.
+
+    :param remove_duplicate_vertices: If set to `True`, duplicate vertices are
+        removed from the scene objects.
     """
     if filename is None:
         return Scene()
 
-    processed = process_xml(filename, merge_shapes=merge_shapes,
-                        merge_shapes_exclude_regex=merge_shapes_exclude_regex)
+    with open(filename, "r") as f: # pylint: disable=unspecified-encoding
+        xml_string = f.read()
 
-    # Since we will be loading directly from a string,
-    # we have to make sure the directory containing the scene
-    # is part of the search path for meshes, etc.
-    thread = mi.Thread.thread()
-    fres_old = thread.file_resolver()
+    # Since we will be loading directly from a string, we have to make sure
+    # the directory containing the scene is part of the search path.
+    fres_old = mi.file_resolver()
     fres = mi.FileResolver(fres_old)
     fres.append(os.path.dirname(filename))
 
     try:
-        thread.set_file_resolver(fres)
-        mi_scene = mi.load_string(processed)
+        mi.set_file_resolver(fres)
+        loaded = load_scene_from_string(
+            xml_string, merge_shapes=merge_shapes,
+            merge_shapes_exclude_regex=merge_shapes_exclude_regex,
+            remove_duplicate_vertices=remove_duplicate_vertices
+        )
     finally:
-        thread.set_file_resolver(fres_old)
+        mi.set_file_resolver(fres_old)
 
-    return Scene(mi_scene=mi_scene)
+    return loaded
 
-def process_xml(fname: str,
-                merge_shapes: bool=True,
-                merge_shapes_exclude_regex: str | None=None,
-                default_thickness: float=DEFAULT_THICKNESS) -> str:
-    """
-    Preprocess the XML string describing the scene
 
-    This function adds radio material holders to allow users to change the
-    material describing a scene, and add an instruction to merge shapes that
-    share the same radio material to speed-up ray tracing.
+def load_scene_from_string(
+    xml_string: str, merge_shapes: bool = True,
+    merge_shapes_exclude_regex: str | None = None,
+    remove_duplicate_vertices: bool = False
+) -> Scene:
+    r"""
+    Loads a scene from an XML string.
 
-    :param fname: Filename to load
-
+    :param scene_string: XML string containing the scene.
     :param merge_shapes: If set to `True`, shapes that share
         the same radio material are merged.
-
     :param merge_shapes_exclude_regex: Optional regex to exclude shapes from
         merging. Only used if ``merge_shapes`` is set to `True`.
-
-    :param default_thickness: Default thickness [m] of radio materials
+    :param remove_duplicate_vertices: If set to `True`, duplicate vertices are
+        removed from the scene objects.
     """
+    processed = process_xml(xml_string, merge_shapes=merge_shapes,
+                        merge_shapes_exclude_regex=merge_shapes_exclude_regex)
+    mi_scene = mi.load_string(processed, optimize=False)
 
-    # Compile the regex if not 'None'
-    if merge_shapes_exclude_regex is not None:
-        regex = re.compile(merge_shapes_exclude_regex)
-    else:
-        regex = None
-
-    tree = ET.parse(fname)
-    root = tree.getroot()
-
-    # 1. Replace BSDFs with radio BSDFs
-    # If a BSDF node in the XML scene has a special name starting with
-    # `mat-itu_` or `itu_`, we automatically convert that BSDF to an
-    # `itu-radio-material` plugin.
-    # All other nodes are left untouched, assuming that they already are
-    # radio materials.
-    #
-    # Finally, all BSDF nodes that are not HolderMaterial are wrapped in a
-    # HolderMaterial node, in order to enable setting the BSDF after the scene
-    # has been loaded. Note this is a temporary measure until a
-    # `Shape::set_bsdf()` method is available.
-    #
-    # We don't need to process BSDFs nested in other BSDFs, e.g. a `diffuse`
-    # inside of a `twosided`. We just process the outermost BSDF element.
-    for bsdf in root.findall("./bsdf") + root.findall(".//shape/bsdf"):
-        bsdf_type = bsdf.attrib.get("type")
-        mat_id = bsdf.attrib.get("id")
-
-        # Ensure compatibility with Sionna v0.x ITU radio materials
-        name = mat_id
-        if name.startswith("mat-"):
-            name = name[4:]
-        if name.startswith("itu_"):
-            bsdf_type = "itu-radio-material"
-            props = {}
-
-            # Preserve user-defined thickness, if any
-            thickness = default_thickness
-            # Returns first match
-            thickness_prop = bsdf.find("float[@name='thickness']")
-            if thickness_prop is not None:
-                thickness = float(thickness_prop.get("value", thickness))
-
-            # Read user-defined material type, if any
-            itu_type = name[4:]
-            type_prop = bsdf.find("string[@name='type']")
-            if type_prop is not None:
-                itu_type = type_prop.get("value")
-
-            props["type"] = ("string", itu_type)
-            props["thickness"] = ("float", thickness)
-
-            # TODO: we could consider saving some information about the original
-            # "visual" BSDFs if that allows users to customize the look of their
-            # scenes easily from Blender.
-            bsdf.clear()
-            bsdf.attrib["type"] = bsdf_type
-            if mat_id is not None:
-                bsdf.attrib["id"] = mat_id
-            for k, (t, v) in props.items():
-                bsdf.append(ET.Element(t, {"name": k, "value": str(v)}))
-
-        # All BSDFs must be wrapped into a `HolderMaterial` so that we can let
-        # the user easily swap BSDFs later on.
-        if bsdf_type != "holder-material":
-            inner = deepcopy(bsdf)
-            bsdf.clear()
-            bsdf.attrib["type"] = "holder-material"
-            if "id" in inner.attrib:
-                bsdf.attrib["id"] = "holder-" + inner.attrib["id"]
-            bsdf.append(inner)
-
-    # 2. Wrap shapes into a `merge` shape if requested. Shapes that are
-    # not merged are assigned individual material holder instances to allow
-    # setting their radio material individually.
-    merge_node = ET.Element("shape", {"type": "merge", "id": "merged-shapes"})
-    merge_node_empty = True
-    for shape in root.findall("shape"):
-        # Shape id
-        shape_id = shape.attrib.get("id")
-
-        # BSDF node
-        rm_id = None
-        rm_node = None
-        # Check for a BSDF nested directly under the shape
-        for bsdf in shape.findall('bsdf'):
-            assert rm_id is None, \
-                   "Only a single BSDF can be assigned to a shape"
-            assert bsdf.attrib["type"] == "holder-material"
-            rm_node = bsdf.find("bsdf")
-            rm_id = rm_node.attrib["id"]
-        # Check for reference to BSDF
-        for nested_ref in shape.findall('ref'):
-            # The 'name' property of the ID is somewhat arbitrary.
-            # Instead, look up the target at the top-level of the scene
-            # and check whether it is a BSDF.
-            target_id = nested_ref.attrib.get("id")
-            target_is_bsdf = (
-                (root.find(f".//bsdf[@id='{target_id}']") is not None)
-                or (merge_node.find(f".//bsdf[@id='{target_id}']") is not None)
-            )
-            if target_is_bsdf:
-                assert rm_id is None, \
-                       "Only a single BSDF can be assigned to a shape"
-                rm_id = target_id
-                rm_node = nested_ref
-
-        # Decide whether or not to merge this shape.
-        should_merge = merge_shapes and not (
-            (merge_shapes_exclude_regex is not None)
-            and regex.search(shape.attrib.get("id", ""))
-        )
-        if rm_node is not None:
-            if should_merge:
-                # Use the generic radio material holder
-                if rm_node.tag == "ref":
-                    # Redirect the reference to the common holder material
-                    # for this radio material.
-                    rm_node.attrib["id"] = "holder-" + rm_id
-                else:
-                    # BSDF is already nested in the shape, let it be.
-                    pass
-            else:
-                # User requested not to merge this shape,
-                # create an individual radio material holder for it.
-                bsdf_holder = ET.SubElement(shape, 'bsdf',
-                                            {'type': 'holder-material',
-                                             'id': f'mat-holder-{shape_id}'})
-                bsdf_holder.append(rm_node)
-                shape.remove(rm_node)
-
-        if should_merge:
-            # Add the shape to the merge node
-            root.remove(shape)
-            merge_node.append(shape)
-            #
-            merge_node_empty = False
-
-    if not merge_node_empty:
-        root.append(merge_node)
-
-    ET.indent(root, space="    ")
-    return ET.tostring(root).decode("utf-8")
-
-def edit_scene_shapes(
-    scene: sionna.rt.Scene,
-    add: (SceneObject |
-                   list[SceneObject] |
-                   dict |
-                   None)=None,
-    remove: (str |
-             SceneObject |
-             list[SceneObject | str] |
-             None)=None,
-    return_dict: bool=False
-) -> dict | mi.Scene:
-    """
-    Builds a *new* Mitsuba Scene object identicaly to `scene`, but which
-    includes the shapes listed in `add` but not the shapes listed in `remove`.
-
-    The shapes and other plugins that are left untouched carry over to the new
-    scene (same objects).
-
-    :param scene: Scene to edit
-
-    :param add: Object, or list /dictionary of objects to be added
-
-    :param remove: Name or object, or list/dictionary of objects or names
-            to be added
-
-    :param return_dict: If `True`, then the new scene is returned as a
-        dictionnary. Otherwise, it is returned as a Mitsuba scene.
-    """
-
-    mi_scene = scene.mi_scene
-
-    # Result scene as a dict
-    result = {
-        "type": "scene",
-    }
-
-    # Local utility to add an object to `result`
-    def add_with_id(obj, fallback_id):
-        if obj is None:
-            return
-        key = obj.id() or fallback_id
-        assert key not in result
-        result[key] = obj
-
-
-    # Add to `result` the visual components of the scene: sensors, integrator,
-    # and environment map
-    for i, sensor in enumerate(mi_scene.sensors()):
-        add_with_id(sensor, f"sensor-{i}")
-    add_with_id(mi_scene.environment(), "envmap")
-    add_with_id(mi_scene.integrator(), "integrator")
-
-    # Build the sets of object ids to remove
-
-    # Set of object ids to remove
-    ids_to_remove = set()
-    # In case some given `Shape` objects don't have IDs, we keep a separate set
-    other_to_remove = set()
-    if remove is not None:
-        if isinstance(remove, (mi.Shape, str, SceneObject)):
-            remove = [remove]
-
-        for v in remove:
-            if isinstance(v, SceneObject):
-                v = v.mi_mesh
-
-            if isinstance(v, str):
-                o = scene.objects.get(v)
-                if o:
-                    mi_id = o.mi_mesh.id()
-                    ids_to_remove.add(mi_id)
-            elif isinstance(v, mi.Shape):
-                v_id = v.id()
-                if v_id:
-                    ids_to_remove.add(v_id)
-                else:
-                    # Shape doesn't have an ID, we still want to remove it
-                    other_to_remove.add(v)
-            else:
-                raise ValueError(f"Cannot remove object of type ({type(v)})."
-                                  " The `remove` argument should be a list"
-                                  " containing either shape instances or shape"
-                                  " IDs.")
-
-    # Add to `result` all shapes of the current scene, except the ones we want
-    # to exclude
-
-    n_shapes = 0
-    for shape in mi_scene.shapes():
-        shape_id = shape.id()
-        if (shape_id in ids_to_remove) or (shape in other_to_remove):
-            continue
-
-        if not shape_id:
-            shape_id = f"shape-{n_shapes}"
-        assert shape_id not in result
-        result[shape_id] = shape
-        n_shapes += 1
-
-    # Add the objects provided by the user though `add` to `result`
-
-    if add is not None:
-        if isinstance(add, (mi.Object, dict, SceneObject)):
-            add = [add]
-
-        for a in add:
-            if isinstance(a, SceneObject):
-                a = a.mi_mesh
-
-            if isinstance(a, dict):
-                new_id = a.get("id")
-            elif isinstance(a, mi.Object):
-                new_id = a.id()
-            else:
-                raise ValueError(f"Cannot add object of type ({type(a)})."
-                                  " The `add` argument should be a list"
-                                  " containing either a dict to be loaded by"
-                                  " `mi.load_dict()` or an existing Mitsuba"
-                                  " object instance.")
-
-            if not new_id:
-                if isinstance(a, mi.Shape):
-                    new_id = f"shape-{n_shapes}"
-                    n_shapes += 1
-                else:
-                    new_id = f"object-{len(result)}"
-
-            if new_id in result:
-                raise ValueError(f"Cannot add object of type ({type(a)}) with"
-                                 f" ID \"{new_id}\" because this ID is already"
-                                 " used in the scene.")
-
-            result[new_id] = a
-
-    if return_dict:
-        return result
-    else:
-        return mi.load_dict(result)
-
-def extend_scene_with_mesh(scene: mi.Scene, mesh: mi.Mesh):
-    """
-    Add a mesh to a Mitsuba scene
-
-    This function takes a Mitsuba scene and a mesh, and adds the mesh
-    to the scene.
-
-    :param scene: The Mitsuba scene to which the mesh will be added.
-    :param mesh: The Mitsuba mesh to be added to the scene.
-
-    :return: New Mitsuba scene with the mesh added
-    """
-
-    # Result scene as a dict
-    result = {
-        "type": "scene",
-    }
-
-    # Add to `result` all shapes of the current shapes
-    for s in scene.shapes():
-        shape_id = s.id()
-        result[shape_id] = s
-
-    # Add the shape
-    result[mesh.id()] = mesh
-
-    return mi.load_dict(result)
+    return Scene(mi_scene=mi_scene,
+                 remove_duplicate_vertices=remove_duplicate_vertices)
 
 
 #
@@ -1443,6 +1183,15 @@ Note: In the figure below, the upper face of the box has been removed for
 visualization purposes. In the actual scene, the box is closed on all sides.
 
 .. figure:: ../figures/box_two_screens.png
+   :align: center
+"""
+
+box_knife = str(files(scenes).joinpath("box_knife/box_knife.xml"))
+# pylint: disable=C0301
+"""
+Example scene containing a metallic box and a knife made of glass
+
+.. figure:: ../figures/box_knife.png
    :align: center
 """
 

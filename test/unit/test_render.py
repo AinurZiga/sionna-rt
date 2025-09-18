@@ -67,7 +67,7 @@ def test01_render_with_paths():
     # Set the material properties.
     eta_r, sigma = itu_material("metal", 3e9) # ITU material evaluated at 3GHz
     for sh in scene.mi_scene.shapes():
-        material = sh.bsdf().radio_material
+        material = sh.bsdf()
         material.relative_permittivity = eta_r
         material.conductivity = sigma
         material.scattering_coefficient = 0.01
@@ -183,8 +183,8 @@ def test04_render_to_file_with_mesh_radio_map():
     radio_map = get_example_radio_map(scene, "building_4", scale_factor=1.01)
 
     configs = {
-        "rm": (radio_map, [72.18, 124.39,  90.78, 181.18]),
-        "baseline": (None, [151.19, 141.19, 127.90, 179.44]),
+        "rm": (radio_map, [72.29, 124.49,  90.82, 181.18]),
+        "baseline": (None, [151.34, 141.33, 127.91, 179.44]),
     }
     # Compare rendering with & without our mesh-based radio map.
     for config_name, (rm_or_none, expected_mean_color) in configs.items():
@@ -246,7 +246,7 @@ def test05_render_mesh_radio_map_orientation():
         if flip_normals:
             # Flip face normals by re-ordering the vertices in each face.
             mesh = radio_map.measurement_surface
-            assert not mesh.has_vertex_normals() and not mesh.has_face_normals()
+            assert not mesh.has_vertex_normals()
             props = mi.traverse(mesh)
             face_indices = dr.unravel(mi.Point3u, props["faces"])
             tmp = type(face_indices.z)(face_indices.z)

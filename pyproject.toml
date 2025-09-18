@@ -10,7 +10,7 @@ where = ["src"]
 
 [project]
 name = "sionna-rt"
-version = "1.1.0"
+version = "1.2.0"
 description = "Sionna RT - A hardware-accelerated differentiable ray tracer for radio propagation modeling"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -34,10 +34,10 @@ classifiers = [
     "Intended Audience :: Telecommunications Industry",
     "Operating System :: OS Independent"
 ]
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 dependencies = [
-    "mitsuba==3.6.2",
-    "drjit==1.0.3",
+    "mitsuba==3.7.1",
+    "drjit==1.2.0",
     "matplotlib>=3.10",
     "scipy>=1.14.1",
     "numpy>=1.26",

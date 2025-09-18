@@ -429,6 +429,11 @@
 		<boolean name="face_normals" value="true"/>
 		<ref id="metal" name="bsdf"/>
 	</shape>
+	<shape type="ply" id="mesh-element_036-itu_concrete">
+		<string name="filename" value="meshes/element_036-itu_concrete.ply"/>
+		<boolean name="face_normals" value="true"/>
+		<ref id="concrete" name="bsdf"/>
+	</shape>
 	<shape type="ply" id="mesh-element_037-itu_marble">
 		<string name="filename" value="meshes/element_037-itu_marble.ply"/>
 		<boolean name="face_normals" value="true"/>
@@ -891,6 +896,11 @@
 		<string name="filename" value="meshes/element_081-itu_marble.ply"/>
 		<boolean name="face_normals" value="true"/>
 		<ref id="marble" name="bsdf"/>
+	</shape>
+	<shape type="ply" id="mesh-element_081-itu_concrete">
+		<string name="filename" value="meshes/element_081-itu_concrete.ply"/>
+		<boolean name="face_normals" value="true"/>
+		<ref id="concrete" name="bsdf"/>
 	</shape>
 	<shape type="ply" id="mesh-element_081-itu_metal">
 		<string name="filename" value="meshes/element_081-itu_metal.ply"/>

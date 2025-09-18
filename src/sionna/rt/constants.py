@@ -6,6 +6,7 @@
 
 import drjit as dr
 import mitsuba as mi
+import numpy as np
 
 
 class InteractionType:
@@ -24,6 +25,9 @@ class InteractionType:
 
     #: Refraction
     REFRACTION    = 1 << 2 # 4
+
+    #: Diffraction
+    DIFFRACTION   = 1 << 3 # 8
 
 #: Default frequency [Hz]
 DEFAULT_FREQUENCY = 3.5e9
@@ -44,6 +48,8 @@ DEFAULT_PREVIEW_BACKGROUND_COLOR = "white"
 DEFAULT_TRANSMITTER_COLOR = (1.0, 0.0, 0.0)
 #: Default color used to visualize receivers in preview and rendering (R,G,B)
 DEFAULT_RECEIVER_COLOR = (0.4, 0.8, 0.4)
+#: Default color used to visualize picked points in preview (R,G,B)
+DEFAULT_PICKER_COLOR = (0.99, 0.73, 0.01)
 
 #: Color used to visualize line-of-sight path segments (R,G,B)
 LOS_COLOR = (0.5, 0.5, 0.5)
@@ -53,6 +59,8 @@ SPECULAR_COLOR = (0.6, 0.6, 1.0)
 DIFFUSE_COLOR = (0.6, 1., 0.6)
 #: Color used to visualize transmitted path segments (R,G,B)
 REFRACTION_COLOR = (1., 0.6, 0.6)
+#: Color used to visualize diffracted path segments (R,G,B)
+DIFFRACTION_COLOR = (0.6, 0.0, 0.6)
 
 # Maps interaction type to color
 INTERACTION_TYPE_TO_COLOR = {
@@ -60,15 +68,21 @@ INTERACTION_TYPE_TO_COLOR = {
     InteractionType.SPECULAR: SPECULAR_COLOR,
     InteractionType.DIFFUSE: DIFFUSE_COLOR,
     InteractionType.REFRACTION: REFRACTION_COLOR,
+    InteractionType.DIFFRACTION: DIFFRACTION_COLOR,
 }
+
+# Flag used to indicate to the radio material that the Jones matrix is not
+# needed when calling the `sample()` method.
+# Not computing the Jones matrix can significantly speed up the computation.
+NO_JONES_MATRIX = 1 << 10
 
 #: Constant representing the default thickness of radio materials [m]
 DEFAULT_THICKNESS = 0.1
 
 #: Constant representing an invalid shape
-INVALID_SHAPE           = 0xFFFFFFFF
+INVALID_SHAPE           = np.uint32(0xFFFFFFFF)
 #: Constant representing an invalid primitive
-INVALID_PRIMITIVE       = 0xFFFFFFFF
+INVALID_PRIMITIVE       = np.uint32(0xFFFFFFFF)
 
 #: Numerical stability constant
 EPSILON_FLOAT = dr.epsilon(mi.Float) * 100.

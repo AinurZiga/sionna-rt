@@ -66,6 +66,7 @@ def validate_cm(los=False,
                 specular_reflection=False,
                 diffuse_reflection=False,
                 refraction=False,
+                diffraction=False,
                 rm_center_z=1,
                 tx_pattern="iso",
                 rx_pattern="iso",
@@ -102,7 +103,10 @@ def validate_cm(los=False,
                    los=los,
                    specular_reflection=specular_reflection,
                    diffuse_reflection=diffuse_reflection,
-                   refraction=refraction)
+                   refraction=refraction,
+                   diffraction=diffraction,
+                   edge_diffraction=diffraction,
+                   diffraction_lit_region=diffraction)
 
     cell_centers = rm.cell_centers.numpy()
     cell_centers = np.reshape(cell_centers, [-1,3])
@@ -119,14 +123,17 @@ def validate_cm(los=False,
                    los=los,
                    specular_reflection=specular_reflection,
                    diffuse_reflection=diffuse_reflection,
-                   refraction=refraction)
+                   refraction=refraction,
+                   diffraction=diffraction,
+                   edge_diffraction=diffraction,
+                   diffraction_lit_region=diffraction)
 
     rm_theo = paths_to_coverage_map(paths)[0]
-    rm_rt =rm.path_gain.numpy()[0]
+    rm_rt = rm.path_gain.numpy()[0]
 
     err = np.where(rm_theo == 0.0,
-                    0.0,
-                    np.abs(rm_rt - rm_theo) / rm_theo)
+                   0.0,
+                   np.abs(rm_rt - rm_theo) / rm_theo)
 
     nmse_db = 10*np.log10(np.mean(np.abs(err)**2))
     return rm, rm_theo, nmse_db
@@ -170,6 +177,7 @@ def test_random_positions():
                    specular_reflection=True,
                    diffuse_reflection=True,
                    refraction=True,
+                   diffraction=True,
                    samples_per_tx=int(1e7))
 
     samples_pos, samples_cell_ind = rm.sample_positions(batch_size,
@@ -200,6 +208,7 @@ def test_random_positions():
                    specular_reflection=True,
                    diffuse_reflection=True,
                    refraction=True,
+                   diffraction=True,
                    samples_per_tx=int(1e7))
     samples_pos, samples_cell_ind = rm.sample_positions(batch_size,
                                                         min_val_db=-110,
@@ -246,23 +255,23 @@ def test_random_positions():
 
     # Add the first transmitter
     tx0 = Transmitter(name='tx0',
-                        position=mi.Point3f(150, -100, 20),
-                        orientation=mi.Point3f(0., 0., dr.pi*5/6),
-                        power_dbm=44)
+                      position=mi.Point3f(150, -100, 20),
+                      orientation=mi.Point3f(0., 0., dr.pi*5/6),
+                      power_dbm=44)
     scene.add(tx0)
 
     # Add the second transmitter
     tx1 = Transmitter(name='tx1',
-                    position=mi.Point3f(-150, -100, 20),
-                    orientation=mi.Point3f(0., 0., dr.pi/60),
-                    power_dbm=44)
+                      position=mi.Point3f(-150, -100, 20),
+                      orientation=mi.Point3f(0., 0., dr.pi/60),
+                      power_dbm=44)
     scene.add(tx1)
 
     # Add the third transmitter
     tx2 = Transmitter(name='tx2',
-                    position=mi.Point3f(0, 150 * dr.tan(dr.pi/3) - 100, 20),
-                    orientation=mi.Point3f(0., 0., -dr.pi/2),
-                    power_dbm=44)
+                      position=mi.Point3f(0, 150 * dr.tan(dr.pi/3) - 100, 20),
+                      orientation=mi.Point3f(0., 0., -dr.pi/2),
+                      power_dbm=44)
     scene.add(tx2)
 
     # Compute radio map
@@ -274,6 +283,7 @@ def test_random_positions():
                    specular_reflection=True,
                    diffuse_reflection=True,
                    refraction=True,
+                   diffraction=True,
                    samples_per_tx=int(1e7))
 
     metric = 'sinr'
@@ -282,9 +292,9 @@ def test_random_positions():
     cell_to_tx_ideal[np.max(sm, axis=0)==0] = -1
 
     _, samples_cell_ind = rm.sample_positions(batch_size,
-                                            center_pos=False,
-                                            tx_association=True,
-                                            metric=metric)
+                                              center_pos=False,
+                                              tx_association=True,
+                                              metric=metric)
     samples_cell_ind = samples_cell_ind.numpy()
 
     for tx in range(sm.shape[0]):
@@ -410,6 +420,139 @@ def test_refraction():
     _, _, nmse_db = validate_cm(refraction=True, tx_pol="cross", rm_center_z=-1)
     assert nmse_db <  -20
 
+def test_edge_diffraction():
+    """Test that diffraction pathgain map is close to exact path calculation"""
+    _, _, nmse_db = validate_cm(diffraction=True, tx_pol="V", rm_center_z=-1)
+    assert nmse_db <  -20
+    _, _, nmse_db = validate_cm(diffraction=True, tx_pol="cross", rm_center_z=-1)
+    assert nmse_db <  -20
+
+def test_wedge_diffraction():
+    """Test that diffraction pathgain map is close to exact path calculation
+    for a wedge"""
+
+    scene = load_scene(rt.scene.simple_wedge)
+
+    scene.tx_array = PlanarArray(num_rows=1,
+                num_cols=1,
+                vertical_spacing=0.5,
+                horizontal_spacing=0.5,
+                pattern="iso",
+                polarization="V")
+    scene.rx_array = PlanarArray(num_rows=1,
+                                num_cols=1,
+                                vertical_spacing=0.5,
+                                horizontal_spacing=0.5,
+                                pattern="iso",
+                                polarization="VH")
+
+    # Unique transmitter
+    tx = Transmitter(name="tx",
+                    position=[1.0, 1.0, 0.0],
+                    orientation=[0,0,0])
+    scene.add(tx)
+
+    # Compute the diffracted field energy using the radio map
+    rm = RadioMapSolver()(scene=scene,
+                        center=mi.Point3f(-1., -2.5, -10.),
+                        orientation=mi.Point3f(0., 0., 0.),
+                        size=mi.Point2f(1., 1.),
+                        cell_size=mi.Point2f(0.1, 0.1),
+                        samples_per_tx=10**8,
+                        los=False,
+                        specular_reflection=False,
+                        diffuse_reflection=False,
+                        refraction=False,
+                        diffraction=True,
+                        diffraction_lit_region=True)
+    rm_np = rm.path_gain.numpy()[0]
+
+    # Compute the diffracted field using the paths solver
+    cell_centers = np.reshape(rm.cell_centers.numpy(), [-1,3])
+    for i, rx_pos in enumerate(cell_centers):
+        scene.add(Receiver(name=f"rx-{i}",
+                        position=rx_pos,
+                        orientation=mi.Point3f(0., 0., 0.)))
+    paths = PathSolver()(scene,
+                        samples_per_src=10**5,
+                        max_num_paths_per_src=1000,
+                        max_depth=1,
+                        los=False,
+                        specular_reflection=False,
+                        diffuse_reflection=False,
+                        refraction=False,
+                        diffraction=True)
+    a, _ = paths.cir(out_type="numpy")
+    paths_rm = np.sum(np.square(np.abs(a)), axis=1)
+    paths_rm = np.squeeze(paths_rm)
+    paths_rm = np.reshape(paths_rm, [10, 10])
+
+    err = np.abs(rm_np - paths_rm) / paths_rm
+    err_db = 10.*np.log10(err)
+    assert np.max(err_db) < -10
+
+def test_diffraction_street_canyon():
+    """Test that diffraction pathgain map is close to exact path calculation
+    for the simple_street_canyon scene"""
+
+    scene = load_scene(rt.scene.simple_street_canyon)
+
+    tx = Transmitter(name="tx",
+                     position=[-45, 11.8, 35],
+                     orientation=[0, 0, 0])
+    scene.add(tx)
+
+    scene.tx_array = PlanarArray(num_rows=1,
+                                 num_cols=1,
+                                 vertical_spacing=0.5,
+                                 horizontal_spacing=0.5,
+                                 pattern="iso",
+                                 polarization="V")
+
+    rmap = RadioMapSolver()(scene=scene,
+                            samples_per_tx=10**9,
+                            cell_size=(0.5, 0.5),
+                            los=False,
+                            specular_reflection=False,
+                            refraction=False,
+                            diffraction=True,
+                            diffraction_lit_region=True)
+
+    rx_indices = [(120, 120), (160, 50), (160, 150), (120, 200), (220, 100),
+                  (175, 350)]
+    for i, p in enumerate(rx_indices):
+        rx_pos = rmap.cell_centers[p[0], p[1]]
+        scene.add(
+            Receiver(name=f"rx-{i}", position=rx_pos.numpy(),
+                     display_radius=3.0)
+        )
+
+    scene.rx_array = PlanarArray(num_rows=1,
+                                 num_cols=1,
+                                 vertical_spacing=0.5,
+                                 horizontal_spacing=0.5,
+                                 pattern="iso",
+                                 polarization="VH")
+
+    paths = PathSolver()(scene=scene,
+                         los=False,
+                         samples_per_src=10**6,
+                         specular_reflection=False,
+                         refraction=False,
+                         diffraction=True,
+                         diffraction_lit_region=True)
+
+    a, _= paths.cir(out_type="numpy")
+    a = np.squeeze(a)
+    paths_en = np.sum(np.square(np.abs(a)), axis=(1,2))
+
+    for i, ind in enumerate(rx_indices):
+        g_rm = rmap.path_gain.numpy()[0, ind[0], ind[1]]
+        g_paths = paths_en[i]
+        err = np.abs(g_rm - g_paths)/g_paths
+        err_db = 10.*np.log10(err)
+        assert np.max(err_db) < -5
+
 def test_box_01():
     """Test that field scattered and reflected fields jointly match for
     max_depth=1 in the box scene.
@@ -419,23 +562,22 @@ def test_box_01():
     los = False
     specular_reflection = True
     diffuse_reflection = True
-    refraction=False
+    refraction = False
     max_depth = 1 # Test only works for max_depth=1
-    width=10
     delta = 1
 
     scene = load_scene(rt.scene.box, merge_shapes=False)
     scene.objects["box"].radio_material = ITURadioMaterial("concrete", "concrete", 0.1)
     scene.objects["box"].radio_material.scattering_coefficient = dr.sqrt(0.5)
-    scene.objects["box"].radio_material.scattering_pattern =\
+    scene.objects["box"].radio_material.scattering_pattern = \
         BackscatteringPattern(alpha_r=30, alpha_i=10, lambda_=0.5)
 
     scene.tx_array = default_array(pattern="tr38901")
     scene.rx_array = default_array(polarization="VH")
 
     scene.add(Transmitter(name="tx",
-                  position=mi.Point3f(1.1, 0.8, 2),
-                  orientation=mi.Point3f(0,0,0)))
+                          position=mi.Point3f(1.1, 0.8, 2),
+                          orientation=mi.Point3f(0,0,0)))
     scene.get("tx").look_at(mi.Point3f(5,5,5))
 
     rm_solver = RadioMapSolver()
@@ -450,8 +592,8 @@ def test_box_01():
 
     for i, pos in enumerate(np.reshape(rm.cell_centers, [-1,3])):
         scene.add(Receiver(name=f"rx-{i}",
-                            position=pos,
-                            orientation=mi.Point3f(0, 0, 0)))
+                           position=pos,
+                           orientation=mi.Point3f(0, 0, 0)))
 
     solver = PathSolver()
     paths = solver(scene,
@@ -461,10 +603,11 @@ def test_box_01():
                    los=los,
                    specular_reflection=specular_reflection,
                    diffuse_reflection=diffuse_reflection,
-                   refraction=refraction)
+                   refraction=refraction,
+                   diffraction=False)
 
     a = paths_to_coverage_map(paths)[0]
-    nmse_db = 10*np.log10(np.mean( ((rm.path_gain[0]-a)/a)**2 ))
+    nmse_db = 10 * np.log10(np.mean( ((rm.path_gain[0] - a) / a) ** 2 ))
     assert nmse_db < -20
 
 def test_box_02():
@@ -482,9 +625,9 @@ def test_box_02():
     specular_reflection = True
     diffuse_reflection = True
     refraction = False
-    width=9
+    width = 9
     num_cells_x = 20
-    delta = width/num_cells_x
+    delta = width / num_cells_x
     max_depth = 5
 
     scene.add(Transmitter(name="tx",
@@ -518,7 +661,8 @@ def test_box_02():
                    los=los,
                    specular_reflection=specular_reflection,
                    diffuse_reflection=diffuse_reflection,
-                   refraction=refraction)
+                   refraction=refraction,
+                   diffraction=False)
 
     a = paths_to_coverage_map(paths)[0]
     nmse_db = 10*np.log10(np.mean( ((rm.path_gain[0]-a)/a)**2 ))
@@ -589,7 +733,8 @@ def test_mesh_radio_map(los):
                     los=los,
                     specular_reflection=specular_reflection,
                     diffuse_reflection=diffuse_reflection,
-                    refraction=refraction)
+                    refraction=refraction,
+                    diffraction=False)
     a = paths_to_coverage_map(paths, is_mesh=True)[0]
 
     nmse_db = 10*np.log10(np.mean( ((rm.path_gain[0]-a)/a)**2 ))

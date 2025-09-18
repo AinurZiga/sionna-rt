@@ -7,9 +7,10 @@
 import drjit as dr
 import mitsuba as mi
 from typing import Tuple
+from sionna.rt.utils.misc import safe_atan2
 
 
-def phi_hat(phi : mi.Float) -> mi.Vector3f:
+def phi_hat(phi: mi.Float) -> mi.Vector3f:
     # pylint: disable=line-too-long
     r"""
     Computes the spherical unit vector :math:`\hat{\boldsymbol{\varphi}}(\theta, \varphi)`
@@ -24,7 +25,7 @@ def phi_hat(phi : mi.Float) -> mi.Vector3f:
                     dr.zeros(mi.Float, width))
     return v
 
-def theta_hat(theta : mi.Float, phi : mi.Float) -> mi.Vector3f:
+def theta_hat(theta: mi.Float, phi: mi.Float) -> mi.Vector3f:
     # pylint: disable=line-too-long
     r"""
     Computes the spherical unit vector :math:`\hat{\boldsymbol{\theta}}(\theta, \varphi)`
@@ -40,7 +41,7 @@ def theta_hat(theta : mi.Float, phi : mi.Float) -> mi.Vector3f:
                      -sin_theta)
     return v
 
-def theta_phi_from_unit_vec(v : mi.Vector3f) -> Tuple[mi.Float, mi.Float]:
+def theta_phi_from_unit_vec(v: mi.Vector3f) -> Tuple[mi.Float, mi.Float]:
     # pylint: disable=line-too-long
     r"""
     Computes zenith and azimuth angles (:math:`\theta,\varphi`)
@@ -54,10 +55,10 @@ def theta_phi_from_unit_vec(v : mi.Vector3f) -> Tuple[mi.Float, mi.Float]:
     # Clip z for numerical stability
     z = dr.clip(v.z, -1, 1)
     theta = dr.safe_acos(z)
-    phi = dr.atan2(v.y, v.x)
+    phi = safe_atan2(v.y, v.x)
     return theta, phi
 
-def r_hat(theta : mi.Float, phi : mi.Float) -> mi.Vector3f:
+def r_hat(theta: mi.Float, phi: mi.Float) -> mi.Vector3f:
     r"""
     Computes the spherical unit vetor :math:`\hat{\mathbf{r}}(\theta, \phi)`
     as defined in :eq:`spherical_vecs`
@@ -72,7 +73,7 @@ def r_hat(theta : mi.Float, phi : mi.Float) -> mi.Vector3f:
                     cos_theta)
     return v
 
-def rotation_matrix(angles : mi.Point3f) -> mi.Matrix3f:
+def rotation_matrix(angles: mi.Point3f) -> mi.Matrix3f:
     # pylint: disable=line-too-long
     r"""
     Computes the rotation matrix as defined in :eq:`rotation`
@@ -108,3 +109,93 @@ def rotation_matrix(angles : mi.Point3f) -> mi.Matrix3f:
                            [r_31, r_32, r_33]])
 
     return rot_mat
+
+def rotate_vector_around_axis(x: mi.Vector3f,
+                              u: mi.Vector3f,
+                              theta: mi.Float) -> mi.Vector3f:
+    # pylint: disable=line-too-long
+    r"""
+    Rotates vector :math:`\mathbf{x}` around axis :math:`\mathbf{u}` by angle
+    :math:`\theta` using Rodrigues' rotation formula
+
+    The rotation is computed using:
+
+    .. math::
+        \mathbf{R}_{\mathbf{u}}(\theta)\mathbf{x} = \mathbf{u}(\mathbf{u} \cdot \mathbf{x}) + \cos(\theta)(\mathbf{u} \times \mathbf{x}) \times \mathbf{u} + \sin(\theta)(\mathbf{u} \times \mathbf{x})
+
+    :param x: Vector to rotate :math:`\mathbf{x}`
+    :param u: Unit axis vector around which to rotate :math:`\mathbf{u}`
+    :param theta: Rotation angle [rad]
+
+    :return: Rotated vector
+    """
+
+    sin_theta, cos_theta = dr.sincos(theta)
+
+    # u · x (scalar projection of x onto u)
+    u_dot_x = dr.dot(u, x)
+
+    # u × x (cross product)
+    u_cross_x = dr.cross(u, x)
+
+    # (u × x) × u (double cross product)
+    u_cross_x_cross_u = dr.cross(u_cross_x, u)
+
+    # Apply Rodrigues' formula: R_u(θ)x = u(u·x) + cos(θ)(u×x)×u + sin(θ)(u×x)
+    rotated = u * u_dot_x + cos_theta * u_cross_x_cross_u\
+                + sin_theta * u_cross_x
+
+    return rotated
+
+def vector_plane_reflection(u: mi.Vector3f,
+                            n: mi.Vector3f | mi.Normal3f,
+                            active: mi.Bool) -> mi.Vector3f:
+    # pylint: disable=line-too-long
+    r"""
+    Computes the mirror image of a vector with respect to a plane
+
+    Given a vector :math:`\mathbf{u}` and a plane with normal :math:`\mathbf{n}`,
+    this function computes the mirror image of the vector using:
+
+    .. math::
+        \mathbf{u}' = \mathbf{u} - 2(\mathbf{u} \cdot \mathbf{n})\mathbf{n}
+
+    :param u: Vector to mirror :math:`\mathbf{u}`
+    :param n: Unit normal vector of the plane :math:`\mathbf{n}`
+    :param active: Boolean mask indicating which elements to process
+
+    :return: Mirrored vector :math:`\mathbf{u}'`
+    """
+
+    u_prime = dr.select(active,
+                        u - 2 * dr.dot(u, n) * n,
+                        u)
+    return u_prime
+
+def point_plane_reflection(p: mi.Point3f,
+                           n: mi.Vector3f | mi.Normal3f,
+                           v: mi.Point3f,
+                           active: mi.Bool) -> mi.Point3f:
+    # pylint: disable=line-too-long
+    r"""
+    Computes the mirror image of a point with respect to a plane
+
+    Given a point :math:`\mathbf{p}`, a plane with normal :math:`\mathbf{n}`,
+    and a point :math:`\mathbf{v}` on the plane, this function computes the
+    mirror image of the point using:
+
+    .. math::
+        \mathbf{p}' = \mathbf{p} - 2((\mathbf{p} - \mathbf{v}) \cdot \mathbf{n})\mathbf{n}
+
+    :param p: Point to mirror :math:`\mathbf{p}`
+    :param n: Unit normal vector of the plane :math:`\mathbf{n}`
+    :param v: Point on the plane :math:`\mathbf{v}`
+    :param active: Boolean mask indicating which elements to process
+
+    :return: Mirrored point :math:`\mathbf{p}'`
+    """
+
+    p_prime = dr.select(active,
+                        p - 2 * dr.dot(p - v, n) * n,
+                        p)
+    return p_prime

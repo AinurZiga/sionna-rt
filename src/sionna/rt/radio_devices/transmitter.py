@@ -42,7 +42,7 @@ class Transmitter(RadioDevice):
         for the device as displayed in the previewer and renderer. Each RGB
         component must have a value within the range :math:`\in [0,1]`.
 
-    :param display_radius Defines the radius, in meters, of the sphere that
+    :param display_radius: Defines the radius, in meters, of the sphere that
         will represent this device when displayed in the previewer and renderer.
         If not specified, the radius will be chosen automatically using a heuristic.
     """
@@ -51,7 +51,7 @@ class Transmitter(RadioDevice):
                  position: mi.Point3f,
                  orientation: mi.Point3f | None = None,
                  look_at: mi.Point3f | Self | None = None,
-                 velocity : mi.Vector3f | None = None,
+                 velocity: mi.Vector3f | None = None,
                  power_dbm=DEFAULT_TRANSMIT_POWER_DBM,
                  color: Tuple[float, float, float] = DEFAULT_TRANSMITTER_COLOR,
                  display_radius: float | None = None):

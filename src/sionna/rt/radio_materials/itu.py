@@ -5,6 +5,8 @@
 """Material properties from Section 2.1.4 of recommendation ITU-R P2040"""
 
 import drjit as dr
+import mitsuba as mi
+from typing import Tuple
 
 
 # Data structure storing the properties from Table 3 of ITU-R P2040.
@@ -12,7 +14,7 @@ import drjit as dr
 # different set of parameters.
 #
 # Structure :
-#   material_name : { (min_freq [GHz], max_freq [GHz]): (a, b, c, d) }
+#   material_name: { (min_freq [GHz], max_freq [GHz]): (a, b, c, d) }
 ITU_MATERIALS_PROPERTIES = {
     "concrete"          :   { (1., 100.)    :   (5.24, 0.0, 0.0462, 0.7822) },
 
@@ -46,29 +48,18 @@ ITU_MATERIALS_PROPERTIES = {
 }
 
 
-def itu_material(name, f):
+def itu_material(name: str, f: mi.Float) -> Tuple[mi.Float, mi.Float]:
     r"""
     Evaluates the real component of the relative permittivity and the
-    conductivity [S/m] of the ITU material `name` for the frequency `f`[Hz].
+    conductivity [S/m] of the ITU material `name` for the frequency `f` [Hz]
 
     Implements model from Section 2.1.4 of recommendation ITU-R P2040.
 
-    Input
-    ------
-    name : str
-        Name of the ITU material to evaluate.
+    :param name: Name of the ITU material to evaluate.
         Must be a key of `ITU_MATERIALS_PROPERTIES`.
+    :param f: Frequency [Hz]
 
-    f : mi.Float
-        Frequency [Hz]
-
-    Output
-    -------
-    eta_r : mi.Float
-        Real component of the relative permittivity
-
-    sigma : mi.Float
-        Conductivity [S/m]
+    :return: Real component of the relative permittivity and conductivity [S/m]
     """
 
     if name not in ITU_MATERIALS_PROPERTIES:
@@ -81,7 +72,7 @@ def itu_material(name, f):
     # If the frequency is in none of the valid ranges, an exception is raised
     valid_freq = False
     for f_ranges, params in props.items():
-        if f_ranges[0] < f_ghz < f_ranges[1]:
+        if f_ranges[0] <= f_ghz <= f_ranges[1]:
             a, b, c, d = params
             valid_freq = True
             break

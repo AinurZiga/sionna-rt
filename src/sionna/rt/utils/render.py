@@ -28,7 +28,7 @@ def scene_scale(scene: rt.Scene):
 
     Input
     ------
-    scene : rt.Scene
+    scene: rt.Scene
         Scene to be measured.
 
     Output
@@ -46,25 +46,28 @@ def scene_scale(scene: rt.Scene):
 def make_render_sensor(
     scene: rt.Scene,
     camera: str | rt.Camera | mi.ScalarTransform4f | mi.Sensor,
-    resolution: tuple[int, int], fov: float
+    resolution: tuple[int, int],
+    fov: float | None,
 ) -> mi.Sensor:
     r"""
     Instantiates a Mitsuba sensor (camera) from the provided ``camera`` object.
 
     Input
     ------
-    scene : :class:`~sionna.rt.Scene`
+    scene: :class:`~sionna.rt.Scene`
         The scene
 
-    camera : str | :class:`~sionna.rt.Camera` | :class:`~mitsuba.Sensor`
+    camera: str | :class:`~sionna.rt.Camera` | :class:`~mitsuba.Sensor`
         The name of a camera registered in the scene, or a camera object
         instance, or a "camera to world" transform matrix.
 
-    resolution : [2], int
+    resolution: [2], int
         Size of the rendered figure.
 
-    fov : float
-        Field of view, in degrees.
+    fov: float | None
+        Field of view [deg]. If `None`, the field of view will default to
+        45 degrees, unless `camera` is set to `"preview"`, in which case the
+        field of view of the preview camera is used.
 
     Output
     -------
@@ -74,6 +77,9 @@ def make_render_sensor(
     props = {
         'type': 'perspective',
     }
+
+    if (fov is None) and (camera != "preview"):
+        fov = 45.
 
     if isinstance(camera, str):
         if camera == 'preview':
@@ -141,18 +147,18 @@ def make_render_sensor(
     return mi.load_dict(props)
 
 
-def paths_to_segments(paths : rt.Paths):
+def paths_to_segments(paths: rt.Paths):
     r"""
     Extracts the segments corresponding to a set of ``paths``
 
     Input
     -----
-    paths : :class:`~sionna.rt.Paths`
+    paths: :class:`~sionna.rt.Paths`
         Paths to plot
 
     Output
     -------
-    starts, ends : [n,3], float
+    starts, ends: [n,3], float
         Endpoints of the segments making the paths.
     """
 
@@ -262,12 +268,12 @@ def unmultiply_alpha(arr: np.ndarray):
 
     Input
     -----
-    arr : [w,h,4]
+    arr: [w,h,4]
         An image
 
     Output
     -------
-    arr : [w,h,4]
+    arr: [w,h,4]
         Image with the alpha channel de-modulated (divided out).
     """
     arr = arr.copy()
@@ -289,6 +295,7 @@ def twosided_diffuse(color: mi.Color3f | list[float]) -> mi.BSDF:
 
 def radio_map_to_emissive_shape(radio_map: rt.RadioMap, tx: int | None,
                                 db_scale: bool = True,
+                                rm_cmap: str | callable | None = None,
                                 vmin: float | None = None,
                                 vmax: float | None = None,
                                 rm_metric: str = "path_gain",
@@ -304,11 +311,10 @@ def radio_map_to_emissive_shape(radio_map: rt.RadioMap, tx: int | None,
     if rm_metric=="rss" and db_scale:
         rm_values *= 1000
 
-    if isinstance(radio_map, rt.PlanarRadioMap):
-        rm_values = resample_to_corners(rm_values)
+    texture, opacity = radio_map_texture(
+        rm_values, db_scale=db_scale, rm_cmap=rm_cmap, vmin=vmin, vmax=vmax)
 
-        texture, opacity = radio_map_texture(
-            rm_values, db_scale=db_scale, vmin=vmin, vmax=vmax)
+    if isinstance(radio_map, rt.PlanarRadioMap):
         bsdf = {
             'type': 'mask',
             'opacity': {
@@ -341,10 +347,10 @@ def radio_map_to_emissive_shape(radio_map: rt.RadioMap, tx: int | None,
 
             # Area emitters are single-sided, so we need to flip the rectangle's
             # normals if the camera is on the wrong side.
-            p0 = to_world.transform_affine([-1, -1, 0])
-            p1 = to_world.transform_affine([-1, 0, 0])
-            p2 = to_world.transform_affine([0, -1, 0])
-            plane_center = to_world.transform_affine([0, 0, 0])
+            p0 = to_world @ [-1, -1, 0]
+            p1 = to_world @ [-1, 0, 0]
+            p2 = to_world @ [0, -1, 0]
+            plane_center = to_world @ [0, 0, 0]
             normal = dr.cross(p1 - p0, p2 - p0)
             flip_normal = dr.dot(plane_center - viewpoint, normal) < 0
 
@@ -358,9 +364,6 @@ def radio_map_to_emissive_shape(radio_map: rt.RadioMap, tx: int | None,
 
     elif isinstance(radio_map, rt.MeshRadioMap):
         # rm_values has per-triangle values for the requested tx and metric.
-        texture, opacity = radio_map_texture(
-            rm_values, db_scale=db_scale, vmin=vmin, vmax=vmax)
-
         measurement_surface = radio_map.measurement_surface
         # The measurement surface is not actually part of the scene, so we
         # let it be transparent where there's no coverage, just like for
@@ -393,7 +396,6 @@ def radio_map_to_emissive_shape(radio_map: rt.RadioMap, tx: int | None,
         props = mi.Properties()
         props['bsdf'] = mi.load_dict(bsdf)
         props['emitter'] = mi.load_dict(emitter)
-        # TODO: this doesn't preserve e.g. the `flip_normals` property :(
         cloned_shape = clone_mesh(measurement_surface, props=props)
         cloned_shape.add_attribute("face_opacity", 1, opacity)
         cloned_shape.add_attribute("face_rm_values", 3, texture.ravel())
@@ -404,47 +406,39 @@ def radio_map_to_emissive_shape(radio_map: rt.RadioMap, tx: int | None,
         raise ValueError(f"Unsupported RadioMap type: {type(radio_map)}")
 
 
-def resample_to_corners(values: np.ndarray) -> np.ndarray:
-    """
-    Takes a 2D NumPy array of values defined at cell centers and converts it
-    into an array (with one more row and one more column) with values defined at
-    cell corners.
-    """
-    assert values.ndim == 2
-    padded = np.pad(values, pad_width=((1, 1), (1, 1)), mode='edge')
-    return 0.25 * (
-          padded[ :-1,  :-1]
-        + padded[1:  ,  :-1]
-        + padded[ :-1, 1:  ]
-        + padded[1:  , 1:  ]
-    )
-
-
 def radio_map_texture(
-    rm_values: np.ndarray, db_scale: bool = True,
-    vmin: float | None = None, vmax: float | None = None
+    rm_values: np.ndarray,
+    db_scale: bool = True,
+    rm_cmap: str | callable | None = None,
+    vmin: float | None = None,
+    vmax: float | None = None,
+    premultiply_alpha: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     # Leave zero-valued regions as transparent
-    valid = rm_values > 0.
+    valid = rm_values > 0.0
     opacity = valid.astype(np.float32)
 
     # Color mapping of real values
     rm_values, normalizer, color_map = radio_map_color_mapping(
-        rm_values, db_scale=db_scale, vmin=vmin, vmax=vmax)
+        rm_values, db_scale=db_scale, cmap=rm_cmap, vmin=vmin, vmax=vmax
+    )
+
     texture = color_map(normalizer(rm_values))
     # Eliminate alpha channel
     texture = texture[..., :3]
     # Colors from the color map are gamma-compressed, go back to linear
     texture = np.power(texture, 2.2)
 
-    # Pre-multiply alpha to avoid fringe
-    texture *= opacity[..., None]
+    if premultiply_alpha:
+        # Pre-multiply alpha to avoid fringe
+        texture *= opacity[..., None]
 
     return texture, opacity
 
 
 def radio_map_color_mapping(radio_map: np.ndarray,
                             db_scale: bool = True,
+                            cmap: str | callable | None = None,
                             vmin: float | None = None,
                             vmax: float | None = None):
     """
@@ -452,18 +446,26 @@ def radio_map_color_mapping(radio_map: np.ndarray,
     requested value scale to be displayed.
     Also applies the dB scaling to a copy of the radio map, if requested.
     """
-    valid = np.logical_and(radio_map > 0., np.isfinite(radio_map))
+    valid = np.logical_and(radio_map > 0.0, np.isfinite(radio_map))
     any_valid = np.any(valid)
     radio_map = radio_map.copy()
     if db_scale:
-        radio_map[valid] = 10. * np.log10(radio_map[valid])
-    else:
-        radio_map[valid] = radio_map[valid]
+        radio_map[valid] = 10.0 * np.log10(radio_map[valid])
 
     if vmin is None:
         vmin = radio_map[valid].min() if any_valid else 0
     if vmax is None:
         vmax = radio_map[valid].max() if any_valid else 0
     normalizer = matplotlib.colors.Normalize(vmin=vmin, vmax=vmax)
-    color_map = matplotlib.colormaps.get_cmap('viridis')
+
+    # Make sure that invalid values are outside the color map range.
+    radio_map[~valid] = vmin - 1
+
+    if cmap is None:
+        color_map = matplotlib.colormaps.get_cmap("viridis")
+    elif isinstance(cmap, str):
+        color_map = matplotlib.colormaps.get_cmap(cmap)
+    else:
+        color_map = cmap
+
     return radio_map, normalizer, color_map

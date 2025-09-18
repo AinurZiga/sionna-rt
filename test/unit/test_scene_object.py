@@ -10,12 +10,11 @@ from sionna.rt import load_scene, SceneObject
 
 
 def test_scene_object_clone():
-
     scene = load_scene(sionna.rt.scene.box_one_screen,merge_shapes=False)
 
     screen = scene.objects["screen"]
     screen_clone = screen.clone(name="my-screen-clone")
-    
+
     assert isinstance(screen_clone, SceneObject)
 
     # Check the name is correctly set
@@ -37,17 +36,16 @@ def test_scene_object_clone():
     # Test is_mesh
     ##################
 
-
     screen = scene.objects["screen"]
     screen_clone = screen.clone(name="my-screen-clone", as_mesh=True)
-    
+
     assert isinstance(screen_clone, mi.Mesh)
 
     # Check the name is correctly set
     assert screen_clone.id() == "my-screen-clone"
 
     # Same radio material
-    assert screen_clone.bsdf().radio_material is screen.radio_material
+    assert screen_clone.bsdf() is screen.radio_material
 
     # Identical but not shared geometry
     assert dr.all(screen_clone.faces_buffer() == screen.mi_mesh.faces_buffer())

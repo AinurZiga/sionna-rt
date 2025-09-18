@@ -4,7 +4,6 @@
 #
 """Module implementing radio materials for the Sionna RT"""
 
-from .holder_material import HolderMaterial
 from .radio_material_base import RadioMaterialBase
 from .radio_material import RadioMaterial
 from .itu_material import ITURadioMaterial

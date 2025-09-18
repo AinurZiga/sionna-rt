@@ -14,7 +14,8 @@ from matplotlib.colors import from_levels_and_colors
 import mitsuba as mi
 import numpy as np
 
-from sionna.rt.utils import watt_to_dbm, log10, rotation_matrix
+from sionna.rt.utils import watt_to_dbm, log10, rotation_matrix,\
+    WedgeGeometry, wedge_interior_angle
 from sionna.rt.scene import Scene
 from sionna.rt.constants import DEFAULT_TRANSMITTER_COLOR,\
     DEFAULT_RECEIVER_COLOR
@@ -44,11 +45,11 @@ class PlanarRadioMap(RadioMap):
     """
 
     def __init__(self,
-                 scene : Scene,
-                 cell_size : mi.Point2f,
-                 center : mi.Point3f | None = None,
-                 orientation : mi.Point3f | None = None,
-                 size : mi.Point2f | None = None):
+                 scene: Scene,
+                 cell_size: mi.Point2f,
+                 center: mi.Point3f | None = None,
+                 orientation: mi.Point3f | None = None,
+                 size: mi.Point2f | None = None):
 
         super().__init__(scene)
 
@@ -71,7 +72,7 @@ class PlanarRadioMap(RadioMap):
             size = scene_max - scene_min
             size = mi.Point2f(size.x, size.y)
             # Set the orientation to default value
-            orientation = dr.zeros(mi.Point3f, 1)
+            orientation = mi.Point3f(0)
         elif ((center is None) or (size is None) or (orientation is None)):
             raise ValueError("If one of `center`, `orientation`," \
                              " or `size` is not None, then all of them" \
@@ -90,18 +91,15 @@ class PlanarRadioMap(RadioMap):
         self._orientation = mi.Point3f(orientation)
         self._size = mi.Point2f(size)
 
-        # Builds the Mitsuba rectangle modeling the measurement plane
-        meas_plane = meas_plane = mi.load_dict({'type': 'rectangle'})
-        params = mi.traverse(meas_plane)
-        params['to_world'] = self.to_world
-        params.update()
-        self._meas_plane = meas_plane
+        self._meas_plane = mi.load_dict({
+            'type': 'rectangle',
+            'to_world': self._build_transform(scalar=True)
+        })
 
         # Initialize the pathgain map to zero
-        pathgain_map = dr.zeros(mi.TensorXf, [self.num_tx, cells_per_dim.y[0],
-                                cells_per_dim.x[0]])
-
-        self._pathgain_map = pathgain_map
+        self._pathgain_map = dr.zeros(
+            mi.TensorXf, (self.num_tx, cells_per_dim.y[0], cells_per_dim.x[0])
+        )
 
     @property
     def measurement_surface(self):
@@ -163,7 +161,7 @@ class PlanarRadioMap(RadioMap):
         # To-tensor
         cell_pos = dr.ravel(cell_pos)
         cell_pos = dr.reshape(mi.TensorXf, cell_pos,
-                            [cells_per_dim.y[0], cells_per_dim.x[0], 3])
+                              [cells_per_dim.y[0], cells_per_dim.x[0], 3])
         return cell_pos
 
     @property
@@ -222,42 +220,55 @@ class PlanarRadioMap(RadioMap):
     @property
     def path_gain(self):
         # pylint: disable=line-too-long
-        r"""Path gains across the radio map from all transmitters
+        r"""Path gains across the radio map from all transmitters [unitless, linear scale]
 
         :type: :py:class:`mi.TensorXf [num_tx, cells_per_dim_y, cells_per_dim_x]`
         """
         return self._pathgain_map
 
-    def add(
+    def add_paths(
         self,
-        e_fields : mi.Vector4f,
-        solid_angle : mi.Float,
-        array_w : List[mi.Float],
-        si_mp : mi.SurfaceInteraction3f,
-        k_world : mi.Vector3f,
-        tx_indices : mi.UInt,
-        hit : mi.Bool
-    ) -> None:
+        e_fields: mi.Vector4f,
+        array_w: List[mi.Float],
+        si: mi.SurfaceInteraction3f,
+        k_world: mi.Vector3f,
+        tx_indices: mi.UInt,
+        active: mi.Bool,
+        diffracted_paths: bool,
+        solid_angle: mi.Float | None = None,
+        tx_positions: mi.Point3f | None = None,
+        wedges: WedgeGeometry | None = None,
+        diff_point: mi.Point3f | None = None,
+        wedges_samples_cnt: mi.UInt | None = None):
+        # pylint: disable=line-too-long
         r"""
-        Adds the contribution of the rays that hit the measurement plane to the
-        radio maps
+        Adds the contribution of the paths that hit the measurement surface
+        to the radio maps
 
         The radio maps are updated in place.
 
         :param e_fields: Electric fields as real-valued vectors of dimension 4
-        :param solid_angle: Ray tubes solid angles [sr]
         :param array_w: Weighting used to model the effect of the transmitter
             array
-        :param si_mp: Informations about the interaction with the measurement
-            plane
-        :param k_world: Directions of propagation of the rays
-        :param tx_indices: Indices of the transmitters from which the rays
-            originate
-        :param hit: Flags indicating if the rays hit the measurement plane
+        :param si: Informations about the interaction with the measurement
+            surface
+        :param k_world: Directions of propagation of the incident paths
+        :param tx_indices: Indices of the transmitters from which the rays originate
+        :param active: Flags indicating if the paths should be added to the radio map
+        :param diffracted_paths: Flags indicating if the paths are diffracted
+        :param solid_angle: Ray tubes solid angles [sr] for non-diffracted paths.
+            Not required for diffracted paths.
+        :param tx_positions: Positions of the transmitters
+        :param wedges: Properties of the intersected wedges.
+            Not required for non-diffracted paths.
+        :param diff_point: Position of the diffraction point on the wedge.
+            Not required for non-diffracted paths.
+        :param wedges_samples_cnt: Number of samples on the wedge.
+            Not required for non-diffracted paths.
         """
 
         # Indices of the hit cells
-        cell_ind = self._local_to_cell_ind(si_mp.uv)
+        cell_ind = self._local_to_cell_ind(si.uv)
         # Indices of the item in the tensor storing the radio maps
         tensor_ind = tx_indices * self.cells_count + cell_ind
 
@@ -267,24 +278,37 @@ class PlanarRadioMap(RadioMap):
             a += aw @ e_field
         a = dr.squared_norm(a)
 
-        # Ray weight
-        k_local = si_mp.to_local(k_world)
-        cos_theta = dr.abs(k_local.z)
-        w = solid_angle * dr.rcp(cos_theta)
+        # Ray weight for non-diffracted paths
+        if not diffracted_paths:
+            k_local = si.to_local(k_world)
+            cos_theta = dr.abs(k_local.z)
+            w = solid_angle * dr.rcp(cos_theta)
+        else:
+            # Ray weight for diffracted paths
+            tx_positions_ = dr.gather(mi.Point3f, tx_positions, tx_indices,
+                                     active=active)
+            w = self._diffraction_integration_weight(wedges, tx_positions_,
+                                                   diff_point, k_world, si)
+            # Multiply by edge length and exterior angle
+            w *= wedges.length * (dr.two_pi -
+                                 wedge_interior_angle(wedges.n0, wedges.nn))
+            # Divide by the number of samples on this edge
+            w /= wedges_samples_cnt
 
+        # Apply paths
         a *= w
 
         # Update the path loss map
         dr.scatter_reduce(dr.ReduceOp.Add, self._pathgain_map.array, value=a,
-                        index=tensor_ind, active=hit)
+                          index=tensor_ind, active=active)
 
-    def finalize(self) -> None:
+    def finalize(self):
         r"""Finalizes the computation of the radio map"""
 
         # Scale the pathloss map
         cell_area = self._cell_size[0] * self._cell_size[1]
-        wavelength = self._wavelength
-        scaling = dr.square(wavelength * dr.rcp(4. * dr.pi)) * dr.rcp(cell_area)
+        scaling = dr.square(self._wavelength * dr.rcp(4. * dr.pi)) \
+                  * dr.rcp(cell_area)
         self._pathgain_map *= scaling
 
     @property
@@ -294,27 +318,16 @@ class PlanarRadioMap(RadioMap):
 
         :type: :py:class:`mi.Transform4f`
         """
-
-        center = self.center
-        orientation = self.orientation
-        size = self.size
-
-        orientation_deg = orientation * 180. / dr.pi
-        to_world = mi.Transform4f().translate(center) \
-                                .rotate([0., 0., 1.], orientation_deg.x) \
-                                .rotate([0., 1., 0.], orientation_deg.y) \
-                                .rotate([1., 0., 0.], orientation_deg.z) \
-                                .scale([0.5 * size.x, 0.5 * size.y, 1])
-        return to_world
+        return self._build_transform()
 
     def show(
         self,
-        metric : str = "path_gain",
-        tx : int | None = None,
-        vmin : float | None = None,
-        vmax : float | None = None,
-        show_tx : bool = True,
-        show_rx : bool = False
+        metric: str = "path_gain",
+        tx: int | None = None,
+        vmin: float | None = None,
+        vmax: float | None = None,
+        show_tx: bool = True,
+        show_rx: bool = False
     ) -> plt.Figure:
         r"""Visualizes a radio map
 
@@ -491,7 +504,7 @@ class PlanarRadioMap(RadioMap):
 
         return fig_tx
 
-    def tx_association(self, metric : str = "path_gain") -> mi.TensorXi:
+    def tx_association(self, metric: str = "path_gain") -> mi.TensorXi:
         r"""Computes cell-to-transmitter association
 
         Each cell is associated with the transmitter providing the highest
@@ -513,15 +526,15 @@ class PlanarRadioMap(RadioMap):
 
     def sample_positions(
         self,
-        num_pos : int,
-        metric : str = "path_gain",
-        min_val_db : float | None = None,
-        max_val_db : float | None = None,
-        min_dist : float | None = None,
-        max_dist : float | None = None,
-        tx_association : bool = True,
-        center_pos : bool = False,
-        seed : int = 1
+        num_pos: int,
+        metric: str = "path_gain",
+        min_val_db: float | None = None,
+        max_val_db: float | None = None,
+        min_dist: float | None = None,
+        max_dist: float | None = None,
+        tx_association: bool = True,
+        center_pos: bool = False,
+        seed: int = 1
     ) -> Tuple[mi.TensorXf, mi.TensorXu]:
         # pylint: disable=line-too-long
         r"""Samples random user positions in a scene based on a radio map
@@ -628,7 +641,7 @@ class PlanarRadioMap(RadioMap):
             positions are randomly drawn from the surface of the cell.
 
         :return: Random positions :math:`(x,y,z)` [m]
-            (shape : :py:class:`[num_tx, num_pos, 3]`) that are in cells
+            (shape: :py:class:`[num_tx, num_pos, 3]`) that are in cells
             fulfilling the configured constraints
 
         :return: Cell indices (shape :py:class:`[num_tx, num_pos, 2]`)
@@ -636,33 +649,38 @@ class PlanarRadioMap(RadioMap):
         """
 
         sampled_cells = super().sample_cells(num_pos,
-                                            metric,
-                                            min_val_db, max_val_db,
-                                            min_dist, max_dist,
-                                            tx_association,
-                                            seed)
+                                             metric,
+                                             min_val_db, max_val_db,
+                                             min_dist, max_dist,
+                                             tx_association,
+                                             seed)
 
         # Centers of selected cells
-        cell_centers = self.cell_centers
-        cell_centers_x = cell_centers[...,0].array
-        cell_centers_y = cell_centers[...,1].array
-        cell_centers_z = cell_centers[...,2].array
-        cell_centers = mi.Point3f(cell_centers_x,
-                                cell_centers_y,
-                                cell_centers_z)
+        cell_centers_tensor = self.cell_centers
+        cell_centers = mi.Point3f(cell_centers_tensor[..., 0].array,
+                                  cell_centers_tensor[..., 1].array,
+                                  cell_centers_tensor[..., 2].array)
         sampled_pos = dr.gather(mi.Point3f, cell_centers,
                                 dr.ravel(sampled_cells))
 
         if not center_pos:
             # Directions with respect to which to apply the offset
-            y_dir = 0.5*(self.cell_centers[1,0] - self.cell_centers[0,0])
-            x_dir = 0.5*(self.cell_centers[0,1] - self.cell_centers[0,0])
-            x_dir = mi.Vector3f(x_dir)
-            y_dir = mi.Vector3f(y_dir)
+            to_world = rotation_matrix(self._orientation)
+            x_dir = to_world @ mi.Vector3f(
+                0.5 * self._size.x / mi.Float(self._cells_per_dim.x),
+                0,
+                0
+            )
+            y_dir = to_world @ mi.Vector3f(
+                0,
+                0.5 * self._size.y / mi.Float(self._cells_per_dim.y),
+                0
+            )
+
             # Sample a random offet of each position
-            self._sampler.seed(seed, num_pos*self.num_tx)
-            offset = self._sampler.next_2d()*2-1
-            offset = offset.x*x_dir + offset.y*y_dir
+            self._sampler.seed(seed, num_pos * self.num_tx)
+            offset = self._sampler.next_2d() * 2 - 1
+            offset = offset.x * x_dir + offset.y * y_dir
             sampled_pos += offset
 
         sampled_pos = dr.reshape(mi.TensorXf, sampled_pos,
@@ -683,8 +701,8 @@ class PlanarRadioMap(RadioMap):
     # Internal methods
     ###############################################
 
-    def _local_to_cell_ind(self, p_local : mi.Point2f) -> mi.Int:
-        r"""
+    def _local_to_cell_ind(self, p_local: mi.Point2f) -> mi.Int:
+        """
         Computes the indices of the hitted cells of the map from the local
         :math:`(x,y)` coordinates
 
@@ -693,6 +711,9 @@ class PlanarRadioMap(RadioMap):
 
         :return: Cell indices in the flattened measurement plane
         """
+
+        # Protect against uv == 1.0
+        p_local[p_local == 1.0] = dr.one_minus_epsilon(mi.Float)
 
         # Size of a cell in UV space
         cell_size_uv = mi.Vector2f(self._cells_per_dim)
@@ -705,8 +726,8 @@ class PlanarRadioMap(RadioMap):
 
         return cell_ind
 
-    def _global_to_cell_ind(self, p_global : mi.Point3f) -> mi.Point2u:
-        r"""
+    def _global_to_cell_ind(self, p_global: mi.Point3f) -> mi.Point2u:
+        """
         Computes the indices of the cells which includes the global
         :math:`(x,y,z)` coordinates
 
@@ -732,3 +753,28 @@ class PlanarRadioMap(RadioMap):
         ind = mi.Point2u(dr.floor(ind / self._cell_size))
 
         return ind
+
+    def _build_transform(self, scalar: bool = False) -> mi.Transform4f \
+                                                        | mi.ScalarTransform4f:
+        """Build the `to_world` transform for the plane based on center,
+        orientation, and size properties."""
+
+        orientation_deg = self._orientation * 180. / dr.pi
+        center = self._center
+        size = self._size
+
+        if scalar:
+            tp = mi.ScalarTransform4f
+            orientation_deg = mi.ScalarPoint3f(orientation_deg.x[0],
+                                               orientation_deg.y[0],
+                                               orientation_deg.z[0])
+            center = mi.ScalarPoint3f(center.x[0], center.y[0], center.z[0])
+            size = mi.ScalarPoint2f(size.x[0], size.y[0])
+        else:
+            tp = mi.Transform4f
+
+        return tp.translate(center) \
+                 .rotate([0., 0., 1.], orientation_deg.x) \
+                 .rotate([0., 1., 0.], orientation_deg.y) \
+                 .rotate([1., 0., 0.], orientation_deg.z) \
+                 .scale([0.5 * size.x, 0.5 * size.y, 1])

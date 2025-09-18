@@ -8,6 +8,8 @@ import mitsuba as mi
 import drjit as dr
 from dataclasses import dataclass
 from typing import Tuple
+from sionna.rt.constants import InteractionType
+from sionna.rt.utils import WedgeGeometry
 
 
 class SampleData:
@@ -44,11 +46,13 @@ class SampleData:
         shape               : mi.UInt
         primitive           : mi.UInt
         vertex              : mi.Point3f
+        prob                : mi.Float
 
     def __init__(self,
-                 num_sources : int,
-                 samples_per_src : int,
-                 max_depth : int):
+                 num_sources: int,
+                 samples_per_src: int,
+                 max_depth: int,
+                 diffraction: bool):
 
         # Size of the array
         # If `max_depth` is 0, we need to allocate at least one element to
@@ -73,12 +77,21 @@ class SampleData:
         self._local_mem = dr.alloc_local(SampleData.SampleDataFields,
                                          array_size)
 
+        # Diffracting wedge geometry. As diffraction is only supported for first
+        # order, we do not need to store the wedge geometry for each depth.
+        self._diffraction = diffraction
+        if diffraction:
+            self._diffracting_wedges = dr.alloc_local(WedgeGeometry, 1)
+
     def insert(self,
-               depth : mi.UInt,
-               interaction_types : mi.UInt,
-               shapes : mi.ShapePtr,
-               primitives : mi.UInt,
-               vertices : mi.Point3f):
+               depth: mi.UInt,
+               interaction_types: mi.UInt,
+               shapes: mi.ShapePtr,
+               primitives: mi.UInt,
+               diffracting_wedges: WedgeGeometry,
+               vertices: mi.Point3f,
+               probs: mi.Float,
+               active: mi.Mask):
         # pylint: disable=line-too-long
         r"""
         Stores interaction data for depth ``depth``
@@ -87,7 +100,10 @@ class SampleData:
         :param interaction_types: Type of interaction represented using :class:`~sionna.rt.constants.InteractionType`
         :param shapes: Pointers to the intersected shapes
         :param primitives: Indices of the intersected primitives
+        :param wedge_geometry: Diffracting wedge geometry
         :param vertices: Coordinates of the intersection points
+        :param probs: Probabilities of the sampled interaction types
+        :param active: Mask of active samples
         """
         # Depth ranges from 1 to max_depth
         index = depth - 1
@@ -97,31 +113,56 @@ class SampleData:
 
         # Store data in the buffer
         data = SampleData.SampleDataFields(interaction_types, shapes,
-                                           primitives, vertices)
-        self._local_mem[index] = data
+                                           primitives, vertices, probs)
+        self._local_mem.write(data, index, active=active)
+
+        # Store the local edge index and edge properties
+        if self._diffraction:
+            diffraction = interaction_types == InteractionType.DIFFRACTION
+            self._diffracting_wedges[0] = dr.select(
+                diffraction,
+                diffracting_wedges,
+                self._diffracting_wedges[0]
+            )
 
     def get(self,
-            depth : mi.UInt) -> Tuple[mi.UInt, mi.UInt, mi.UInt, mi.Point3f]:
+            depth: mi.UInt,
+            active: mi.Mask
+        ) -> Tuple[mi.UInt, mi.UInt, mi.UInt, mi.Point3f, mi.Float]:
         # pylint: disable=line-too-long
         r"""
         Returns data about the sample for depth ``depth``
 
         :param depth: Depths for which to return sample data
+        :param active: Mask of active samples
 
         :return: Type of interaction represented using :class:`~sionna.rt.constants.InteractionType`
         :return: Pointers to the intersected shapes
         :return: Indices of the intersected primitives
+        :return: Local indices of the diffracting edges
         :return: Coordinates of the intersection points
+        :return: Probabilities of the sampled interaction types
         """
         index = depth - 1
-        data = self._local_mem[index]
+        data = self._local_mem.read(index, active=active)
 
         interaction_types = data.interaction_type
         shapes = data.shape
         primitives = data.primitive
         vertices = data.vertex
+        probs = data.prob
 
-        return interaction_types, shapes, primitives, vertices
+        return interaction_types, shapes, primitives, vertices, probs
+
+    @property
+    def diffracting_wedges(self):
+        r"""Diffracting wedge geometry
+
+        :type: :py:class:`WedgeGeometry`
+        """
+        if self._diffraction:
+            return self._diffracting_wedges[0]
+        return None
 
     @property
     def src_indices(self):

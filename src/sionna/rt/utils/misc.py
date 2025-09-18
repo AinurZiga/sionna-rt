@@ -9,7 +9,7 @@ import drjit as dr
 import mitsuba as mi
 from .complex import cpx_sqrt
 
-def complex_sqrt(x : mi.Complex2f) -> mi.Complex2f:
+def complex_sqrt(x: mi.Complex2f) -> mi.Complex2f:
     r"""
     Computes the square root of a complex number :math:`x`
 
@@ -22,10 +22,10 @@ def complex_sqrt(x : mi.Complex2f) -> mi.Complex2f:
     return mi.Complex2f(*cpx_sqrt((dr.real(x), dr.imag(x))))
 
 def isclose(
-    a : mi.Float,
-    b : mi.Float,
-    rtol : mi.Float = 1e-5,
-    atol : mi.Float = 1e-8
+    a: mi.Float,
+    b: mi.Float,
+    rtol: mi.Float = 1e-5,
+    atol: mi.Float = 1e-8
 ) -> mi.Bool:
     # pylint: disable=line-too-long
     r"""
@@ -49,7 +49,7 @@ def isclose(
     close &= ~(dr.isnan(a) | dr.isnan(b))
     return close
 
-def log10(x : mi.Float) -> mi.Float:
+def log10(x: mi.Float) -> mi.Float:
     r"""
     Evaluates the base-10 logarithm
 
@@ -57,7 +57,7 @@ def log10(x : mi.Float) -> mi.Float:
     """
     return dr.log(x)/dr.log(10.)
 
-def sinc(x : mi.Float) -> mi.Float:
+def sinc(x: mi.Float) -> mi.Float:
     r"""
     Evaluates the normalized sinc function
 
@@ -67,7 +67,7 @@ def sinc(x : mi.Float) -> mi.Float:
     x = dr.pi*x
     return dr.select(x==0, 1, dr.sin(x)*dr.rcp(x))
 
-def watt_to_dbm(x : mi.Float) -> mi.Float:
+def watt_to_dbm(x: mi.Float) -> mi.Float:
     r"""
     Converts Watt to dBm
 
@@ -80,7 +80,7 @@ def watt_to_dbm(x : mi.Float) -> mi.Float:
     """
     return log10(x)*10. + 30.
 
-def dbm_to_watt(x : mi.Float) -> mi.Float:
+def dbm_to_watt(x: mi.Float) -> mi.Float:
     r"""
     Converts dBm to Watt
 
@@ -93,7 +93,7 @@ def dbm_to_watt(x : mi.Float) -> mi.Float:
     """
     return dr.power(10., (x - 30.) / 10.)
 
-def spectrum_to_matrix_4f(s : mi.Spectrum) -> mi.Matrix4f:
+def spectrum_to_matrix_4f(s: mi.Spectrum) -> mi.Matrix4f:
     r"""
     Builds a :class:`mi.Matrix4f` from a :class:`mi.Spectrum` object
 
@@ -112,7 +112,7 @@ def scoped_set_log_level(level: mi.LogLevel):
 
     :param level: Log level to use within the context
     """
-    logger = mi.Thread.thread().logger()
+    logger = mi.logger()
     previous = logger.log_level()
     logger.set_log_level(level)
     try:
@@ -120,7 +120,7 @@ def scoped_set_log_level(level: mi.LogLevel):
     finally:
         logger.set_log_level(previous)
 
-def sigmoid(x : mi.Float) -> mi.Float:
+def sigmoid(x: mi.Float) -> mi.Float:
     r"""
     Evaluates the sigmoid of ``x``
 
@@ -171,3 +171,25 @@ def map_angle_to_canonical_range(x):
     :param x: Input angle
     """
     return x - dr.two_pi * dr.floor(x*dr.rcp(dr.two_pi))
+
+def safe_atan2(y: mi.Float, x: mi.Float) -> mi.Float:
+    r"""
+    Safe implementation of atan2(y, x) that avoids NaN when both inputs
+    are zero and gradients are computed
+
+    :param y: Input 1
+    :param x: Input 2
+    """
+    both_zero = (x == 0.0) & (y == 0.0)
+    return dr.select(both_zero, 0.0, dr.atan2(y, x))
+
+def cot(x: mi.Float) -> mi.Float:
+    r"""
+    Computes the cotangent of ``x``
+
+    :param x: Input value
+    """
+    y = dr.rcp(dr.tan(x))
+    y = dr.select(dr.isnan(y), 0, y)
+    y = dr.select(dr.isinf(y), 0, y)
+    return y

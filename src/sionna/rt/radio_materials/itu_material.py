@@ -52,41 +52,53 @@ class ITURadioMaterial(RadioMaterial):
 
     # ITU material colors
     ITU_MATERIAL_COLORS = {
-        "marble" : (0.701, 0.644, 0.485),
-        "concrete" : (0.539, 0.539, 0.539),
-        "wood" : (0.266, 0.109, 0.060),
-        "metal" : (0.220, 0.220, 0.254),
-        "brick" : (0.402, 0.112, 0.087),
-        "glass" : (0.168, 0.139, 0.509),
-        "floorboard" : (0.539, 0.386, 0.025),
-        "ceiling_board" : (0.376, 0.539, 0.117),
-        "chipboard" : (0.509, 0.159, 0.323),
-        "plasterboard" : (0.051, 0.539, 0.133),
-        "plywood" : (0.136, 0.076, 0.539),
-        "very_dry_ground" : (0.539, 0.319, 0.223),
-        "medium_dry_ground" : (0.539, 0.181, 0.076),
-        "wet_ground" : (0.539, 0.027, 0.147)
+        "marble": (0.701, 0.644, 0.485),
+        "concrete": (0.539, 0.539, 0.539),
+        "wood": (0.266, 0.109, 0.060),
+        "metal": (0.220, 0.220, 0.254),
+        "brick": (0.402, 0.112, 0.087),
+        "glass": (0.168, 0.139, 0.509),
+        "floorboard": (0.539, 0.386, 0.025),
+        "ceiling_board": (0.376, 0.539, 0.117),
+        "chipboard": (0.509, 0.159, 0.323),
+        "plasterboard": (0.051, 0.539, 0.133),
+        "plywood": (0.136, 0.076, 0.539),
+        "very_dry_ground": (0.539, 0.319, 0.223),
+        "medium_dry_ground": (0.539, 0.181, 0.076),
+        "wet_ground": (0.539, 0.027, 0.147)
     }
 
     # pylint: disable=line-too-long
     def __init__(
         self,
-        name : str | None = None,
-        itu_type : str | None = None,
-        thickness : float | mi.Float | None = None,
-        scattering_coefficient : float | mi.Float = 0.0,
-        xpd_coefficient : float | mi.Float = 0.0,
-        scattering_pattern : Callable[[mi.Vector3f, mi.Vector3f, ...], mi.Float] | None = None,
-        color : Tuple[float, float, float] | None = None,
-        props : mi.Properties | None = None,
+        name: str | None = None,
+        itu_type: str | None = None,
+        thickness: float | mi.Float | None = None,
+        scattering_coefficient: float | mi.Float = 0.0,
+        xpd_coefficient: float | mi.Float = 0.0,
+        scattering_pattern: Callable[[mi.Vector3f, mi.Vector3f, ...], mi.Float] | None = None,
+        color: Tuple[float, float, float] | None = None,
+        props: mi.Properties | None = None,
         **kwargs):
 
-        if props is not None:
-            if props.has_property('type'):
-                itu_type = props['type']
-                props.remove_property('type')
-            else:
-                raise ValueError(f"Missing ITU material type \"{itu_type}\"")
+        has_props = props is not None
+        if has_props:
+            direct_args_none = (
+                (name is None) and (itu_type is None) and (thickness is None)
+                and (scattering_coefficient == 0.0) and (xpd_coefficient == 0.0)
+            )
+            if not direct_args_none:
+                raise ValueError(
+                    "When providing a `props` dictionary, not argument other"
+                    " than `scattering_pattern` and `color` should be provided."
+                )
+            if 'type' not in props:
+                raise ValueError(
+                    "Missing property \"type\" (string) to select the ITU"
+                    " material type."
+                )
+            itu_type = props['type']
+            del props['type']
 
         if itu_type not in ITU_MATERIALS_PROPERTIES:
             raise ValueError(f"Invalid ITU material type \"{itu_type}\"")
@@ -94,14 +106,19 @@ class ITURadioMaterial(RadioMaterial):
 
         if color is None:
             color = ITURadioMaterial.ITU_MATERIAL_COLORS[itu_type]
-            if props:
+            if has_props:
                 props["color"] = mi.ScalarColor3f(color)
 
         # Frequency update callback
         def cb(f: float):
             return itu_material(itu_type, f)
 
-        if props is None:
+        if has_props:
+            super().__init__(scattering_pattern=scattering_pattern,
+                             frequency_update_callback=cb,
+                             props=props,
+                             **kwargs)
+        else:
             super().__init__(name=name,
                              thickness=thickness,
                              scattering_coefficient=scattering_coefficient,
@@ -109,11 +126,6 @@ class ITURadioMaterial(RadioMaterial):
                              scattering_pattern=scattering_pattern,
                              frequency_update_callback=cb,
                              color=color,
-                             **kwargs)
-        else:
-            super().__init__(scattering_pattern=scattering_pattern,
-                             frequency_update_callback=cb,
-                             props=props,
                              **kwargs)
 
     @property

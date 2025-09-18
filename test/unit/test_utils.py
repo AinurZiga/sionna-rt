@@ -8,6 +8,7 @@ import os
 import pytest
 import mitsuba as mi
 import numpy as np
+import scipy.special as sc
 import drjit as dr
 from scipy.constants import speed_of_light, epsilon_0
 from scipy.spatial.transform import Rotation as scipy_rotation
@@ -15,7 +16,7 @@ from scipy.spatial.transform import Rotation as scipy_rotation
 from sionna.rt.utils import complex_sqrt, fresnel_reflection_coefficients_simplified,\
     complex_relative_permittivity, itu_coefficients_single_layer_slab,\
     rotation_matrix, cpx_abs, cpx_add, cpx_div, cpx_exp, cpx_mul, cpx_sqrt, cpx_sub,\
-    cpx_convert, sinc, transform_mesh, load_mesh
+    cpx_convert, sinc, safe_atan2, transform_mesh, load_mesh, sinc, fresnel, f_utd
 
 #############################################################
 # Constants
@@ -232,6 +233,40 @@ def test_complex_sqrt():
 #############################################################
 # Tests - Fresnel coefficients and Materials
 #############################################################
+
+def test_fresnel_integral():
+    """
+    Tests `rt.utils.fresnel` by comparing its output against the one
+    of scipy
+    """
+    nu = np.linspace(-40, 40, 1000000)
+    s_ref, c_ref = sc.fresnel(nu)
+    f = fresnel(mi.Float(np.sign(nu)*0.5*np.pi*(nu**2)))
+    s = f.imag.numpy()
+    c = f.real.numpy()
+    max_abs_err_s = np.max(np.abs(s_ref-s))
+    max_abs_err_c = np.max(np.abs(c_ref-c))
+    assert max_abs_err_s < MAX_RSE
+    assert max_abs_err_c < MAX_RSE
+
+def test_f_utd():
+    """
+    Tests `rt.utils.f_utd` by comparing its output against the one
+    of scipy
+    """
+    def f(x):
+        """F(x) Eq.(88) in [ITUR_P526]
+        """
+        s, c = sc.fresnel(np.sqrt(2*x/np.pi))
+        f_c = c + 1j*s
+        return np.sqrt(np.pi*x/2)*np.exp(1j*x)*(1+1j-2*1j*np.conj(f_c))
+
+    x = np.logspace(-4, 2, 100000)
+
+    y_scipy = f(x)
+    y_dr = f_utd(mi.Float(x)).numpy()
+    max_abs_err = np.max(np.abs(y_scipy-y_dr))
+    assert max_abs_err < MAX_RSE
 
 def test_fresnel_reflection_coefficients_simplified():
     """
@@ -629,6 +664,46 @@ def test_sinc_gradient():
     dr.backward(y)
     assert x.grad[0] == 0
 
+def test_safe_atan2():
+    """Test safe_atan2 function against numpy"""
+    x = dr.linspace(mi.Float, 0, 1, 10)
+    y = dr.linspace(mi.Float, 0, 1, 10)
+    x[-1] = 0
+    y[-3] = 0
+    for attach_y in (False, True):
+        dr.set_grad_enabled(y, attach_y)
+        for attach_x in (False, True):
+            dr.set_grad_enabled(x, attach_x)
+            res_safe = safe_atan2(y, x)
+            with dr.suspend_grad():
+                res_expected = dr.atan2(y, x)
+            assert dr.allclose(res_safe, res_expected)
+
+            if attach_y or attach_x:
+                dr.backward(res_safe)
+                assert not dr.any(dr.isnan(x.grad))
+                assert not dr.any(dr.isnan(y.grad))
+
+                denom = x * x + y * y
+                both_zero = (x == 0) & (y == 0)
+                grad_y_expected = (x / denom) & (~both_zero)
+                grad_x_expected = (-y / denom) & (~both_zero)
+                assert dr.allclose(y.grad, grad_y_expected if attach_y else 0)
+                assert dr.allclose(x.grad, grad_x_expected if attach_x else 0)
+
+            dr.set_grad(x, 0)
+            dr.set_grad(y, 0)
+
+    # Literal case (make sure the result is still attached)
+    x = mi.Float(0)
+    y = mi.Float(0)
+    dr.set_grad_enabled(x, True)
+    dr.set_grad_enabled(y, True)
+    res_safe = safe_atan2(y, x)
+    # Safe result is detached, this is consistent with e.g. `dr.safe_acos()`.
+    assert not dr.grad_enabled(res_safe)
+
+
 #############################################################
 # Tests - Shapes
 #############################################################
@@ -681,5 +756,5 @@ def test_transform_mesh():
     # Translate the mesh
     ref_vertices += t + c
 
-    max_rel_se = np.max(np.abs(vertices_transformed - ref_vertices))
-    assert np.isclose(max_rel_se, 0, atol=1e-6)
+    max_rel_ser = np.max(np.abs(vertices_transformed - ref_vertices))
+    assert np.isclose(max_rel_ser, 0, atol=1e-6)

@@ -103,7 +103,7 @@ class TwosidedAreaEmitter(mi.Emitter):
         return self.nested.bbox()
 
     def to_string(self):
-        return f"TwosidedAreaEmitter[{self.nested.to_string()}]"
+        return f"TwosidedAreaEmitter[{repr(self.nested)}]"
 
     def traverse(self, *args, **kwargs):
         self.nested.traverse(*args, **kwargs)

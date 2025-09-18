@@ -8,7 +8,7 @@ import numpy as np
 import drjit as dr
 
 import sionna
-from sionna.rt import load_scene, Transmitter, Receiver, PlanarArray, PathSolver
+from sionna.rt import load_scene, Transmitter, Receiver, PlanarArray, PathSolver, ITURadioMaterial, SceneObject
 from sionna.rt.utils import r_hat, subcarrier_frequencies
 from scipy.constants import c as SPEED_OF_LIGHT
 
@@ -48,8 +48,10 @@ def compute_doppler_spectrum(scene, paths):
         start=-(num_time_steps-1)/2
         limit=(num_time_steps-1)/2+1
 
-    doppler_frequencies = np.arange(start=start, stop=limit) * doppler_resolution
-    velocities = doppler_frequencies/scene.frequency.numpy()[0]*SPEED_OF_LIGHT
+    doppler_frequencies = np.arange(start=start, stop=limit) \
+                          * doppler_resolution
+    velocities = doppler_frequencies / scene.frequency.numpy()[0] \
+                 * SPEED_OF_LIGHT
 
     return velocities, ds
 
@@ -58,8 +60,84 @@ def compute_doppler_spectrum(scene, paths):
 # Unit tests
 ####################################################
 
+def test_set_velocity_added_object():
+    """Test that the velocity of an object added to a scene can be set"""
+
+    scene = load_scene(sionna.rt.scene.simple_reflector, merge_shapes=False)
+
+    car_material = ITURadioMaterial(name="car-mat", itu_type="metal",
+                                    thickness=0.1)
+    car = SceneObject(fname=sionna.rt.scene.low_poly_car,
+                      name="car",
+                      radio_material=car_material)
+    scene.edit(add=[car])
+    car.position = [0,0,10]
+
+    car.velocity = mi.Vector3f(0.0, 0.0, 1.0)
+    assert dr.all(car.velocity == mi.Vector3f(0.0, 0.0, 1.0))[0]
+
+
+    # Test differentiability with respect to velocity
+    scene.tx_array = scene.rx_array = PlanarArray(num_rows=1,
+                                                num_cols=1,
+                                                vertical_spacing=0.5,
+                                                horizontal_spacing=0.5,
+                                                pattern="iso",
+                                                polarization="V")
+
+    scene.add(Transmitter(name="tx",
+                        position=[-1,0,1],
+                        orientation=[0,0,0]))
+    scene.add(Receiver(name="rx",
+                        position=[1,0,1],
+                        orientation=[0,0,0]))
+
+    solver = PathSolver()
+    dr.enable_grad(car.velocity)
+    solver.loop_mode = "evaluated"
+    paths = solver(scene, los=False, max_depth=1)
+    a, _ = paths.cir(num_time_steps=2)
+    loss = dr.sum(dr.square(a[0]) + dr.square(a[1]))
+    dr.backward(loss)
+    assert np.linalg.norm(car.velocity.grad.numpy()) > 0.0
+
+def test_velocity_differentiability():
+    """
+    Test that the velocity of an object can be differentiated with respect
+    to the CIR.
+    """
+
+    scene = load_scene(sionna.rt.scene.simple_reflector, merge_shapes=False)
+    obj = scene.objects["reflector"]
+
+    scene.tx_array = scene.rx_array = PlanarArray(num_rows=1,
+                                                num_cols=1,
+                                                vertical_spacing=0.5,
+                                                horizontal_spacing=0.5,
+                                                pattern="iso",
+                                                polarization="V")
+
+    scene.add(Transmitter(name="tx",
+                        position=[-1,0,1],
+                        orientation=[0,0,0]))
+    scene.add(Receiver(name="rx",
+                        position=[1,0,1],
+                        orientation=[0,0,0]))
+
+    solver = PathSolver()
+    obj.velocity = mi.Vector3f(0.0, 0.0, 1.0)
+    dr.enable_grad(obj.velocity)
+    solver.loop_mode = "evaluated"
+    paths = solver(scene, los=False, max_depth=1)
+    a, _ = paths.cir(num_time_steps=2)
+    loss = dr.sum(dr.square(a[0]) + dr.square(a[1]))
+    dr.backward(loss)
+    assert np.linalg.norm(obj.velocity.grad.numpy()) > 0.0
+
 def test_moving_tx():
-    """Test that the TX speed can be correctly estimated from the Doppler spectrum"""
+    """
+    Test that the TX speed can be correctly estimated from the Doppler spectrum.
+    """
 
     scene = load_scene()
     scene.tx_array = PlanarArray(num_rows=1,
@@ -91,7 +169,9 @@ def test_moving_tx():
     assert np.abs(v_hat-v_ref)/np.abs(v_ref) <= 0.05
 
 def test_moving_rx():
-    """Test that the RX speed can be correctly estimated from the Doppler spectrum"""
+    """
+    Test that the RX speed can be correctly estimated from the Doppler spectrum.
+    """
 
     scene = load_scene()
     scene.tx_array = PlanarArray(num_rows=1,
@@ -123,7 +203,10 @@ def test_moving_rx():
     assert np.abs(v_hat-v_ref)/np.abs(v_ref) <= 0.05
 
 def test_moving_tx_rx():
-    """Test that the differentia TX-RX speed can be correctly estimated from the Doppler spectrum"""
+    """
+    Test that the differentia TX-RX speed can be correctly estimated from the
+    Doppler spectrum.
+    """
 
     scene = load_scene()
     scene.tx_array = PlanarArray(num_rows=1,
@@ -206,7 +289,7 @@ def test_multi_tx_rx_synthetic_array():
     solver = PathSolver()
     paths = solver(scene, max_depth=1, los=False, synthetic_array=True)
 
-    velocities, ds = compute_doppler_spectrum(scene, paths)
+    _, ds = compute_doppler_spectrum(scene, paths)
     # [num_rx, 1, num_tx, 1, 1]
     ds_max = np.max(np.abs(ds), axis=(1, 3, 4), keepdims=True)
     ds = np.where(ds<ds_max/0.5, 0.0, 1.0)
@@ -216,7 +299,7 @@ def test_multi_tx_rx_synthetic_array():
             ref = ds[i,0,j,0]
             for k in range(scene.rx_array.num_ant):
                 for l in range(scene.tx_array.num_ant):
-                    assert(np.all(ref == ds[i,k,j,l]))
+                    assert np.all(ref == ds[i,k,j,l])
 
 def test_multi_tx_rx_non_synthetic_array():
     """Check that the doppler spectra for all pairs of antennas of each link
@@ -269,7 +352,7 @@ def test_multi_tx_rx_non_synthetic_array():
     solver = PathSolver()
     paths = solver(scene, max_depth=1, los=False, synthetic_array=False)
 
-    velocities, ds = compute_doppler_spectrum(scene, paths)
+    _, ds = compute_doppler_spectrum(scene, paths)
     ds_max = np.max(np.abs(ds), axis=(1, 3, 4), keepdims=True)
     ds = np.where(ds<ds_max/0.5, 0.0, 1.0)
 
@@ -278,7 +361,7 @@ def test_multi_tx_rx_non_synthetic_array():
             ref = ds[i,0,j,0]
             for k in range(scene.rx_array.num_ant):
                 for l in range(scene.tx_array.num_ant):
-                    assert(np.all(ref==ds[i,k,j,l]))
+                    assert np.all(ref==ds[i,k,j,l])
 
 def test_moving_reflector():
     """Test that moving reflector has the right Doppler shift"""
@@ -303,13 +386,16 @@ def test_moving_reflector():
     paths = solver(scene, max_depth=1, los=False)
 
     # Compute theoretical Doppler shift for this path
-    theta_t = np.squeeze(paths.theta_t.numpy())
-    phi_t = np.squeeze(paths.phi_t.numpy())
-    k_0 = r_hat(theta_t, phi_t)
+    theta_t = paths.theta_t.array
+    phi_t = paths.phi_t.array
+    k_0 = r_hat(theta_t, phi_t).numpy()
 
-    theta_r = np.squeeze(paths.theta_r.numpy())
-    phi_r = np.squeeze(paths.phi_r.numpy())
-    k_1 = -r_hat(theta_r, phi_r)
+    theta_r = paths.theta_r.array
+    phi_r = paths.phi_r.array
+    k_1 = -r_hat(theta_r, phi_r).numpy()
 
-    doppler_theo = np.sum((k_1-k_0)*scene.get("reflector").velocity)/scene.wavelength
-    assert np.isclose(np.squeeze(paths.doppler.numpy()), doppler_theo)
+
+    doppler_theo = np.sum(
+        (k_1 - k_0) * scene.get("reflector").velocity.numpy(), axis=0
+    ) / scene.wavelength
+    assert np.allclose(np.squeeze(paths.doppler.numpy()), doppler_theo)

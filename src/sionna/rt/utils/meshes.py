@@ -9,12 +9,14 @@ Meshes-related utilities.
 import os
 import mitsuba as mi
 import drjit as dr
+import numpy as np
 
 import sionna
+import sionna.rt
 from .geometry import rotation_matrix
 
 
-def clone_mesh(mesh : mi.Mesh, name: str | None = None,
+def clone_mesh(mesh: mi.Mesh, name: str | None = None,
                props: mi.Properties | None = None) -> mi.Mesh:
     """
     Clone a Mitsuba mesh object, preserving some of its important properties.
@@ -33,11 +35,9 @@ def clone_mesh(mesh : mi.Mesh, name: str | None = None,
     if props is None:
         props = mi.Properties()
     props.set_id(clone_name)
-    if "bsdf" not in props:
-        props['bsdf'] = mi.load_dict({'type': 'holder-material'})
     if "flip_normals" not in props:
-        # TODO: how can we preserve `flip_normals`?
-        props['flip_normals'] = True
+        props['flip_normals'] = mesh.has_flipped_normals()
+    props["face_normals"] = mesh.has_face_normals()
 
     # Instantiate clone mesh
     result = mi.Mesh(name=clone_name,
@@ -57,7 +57,7 @@ def clone_mesh(mesh : mi.Mesh, name: str | None = None,
 
     return result
 
-def load_mesh(fname: str) -> mi.Mesh:
+def load_mesh(fname: str, flip_normals: bool = True) -> mi.Mesh:
     # pylint: disable=line-too-long
     """
     Load a mesh from a file
@@ -66,31 +66,31 @@ def load_mesh(fname: str) -> mi.Mesh:
     The file must be in either PLY or OBJ format.
 
     :param fname: Filename of the mesh to be loaded
+    :param flip_normals: Whether to invert the normals of the mesh.
 
     :return: Mitsuba mesh object representing the loaded mesh
     """
 
     mesh_type = os.path.splitext(fname)[1][1:]
     if mesh_type not in ('ply', 'obj'):
-        raise ValueError("Invalid mesh type."
-                            " Supported types: `ply` and `obj`")
+        raise ValueError("Invalid mesh type. Supported types: `ply` and `obj`")
 
-    mi_mesh = mi.load_dict({'type': mesh_type,
-                                'filename': fname,
-                                'flip_normals': True,
-                                'bsdf' : {'type': 'holder-material'}
-                                })
-
-    # We need to add a radio material to the object to enable shooting
-    # and bouncing of rays
-    mi_mesh.bsdf().radio_material = sionna.rt.RadioMaterial("dummy", 1.0)
+    mi_mesh = mi.load_dict({
+        'type': mesh_type,
+        'filename': fname,
+        'flip_normals': flip_normals,
+        'face_normals': True,
+        # We need to add a radio material to the object to enable shooting
+        # and bouncing of rays.
+        'bsdf': sionna.rt.RadioMaterial("dummy", 1.0)
+    })
 
     return mi_mesh
 
-def transform_mesh(mesh : mi.Mesh,
-                   translation : mi.Point3f | None = None,
-                   rotation : mi.Point3f | None = None,
-                   scale : mi.Point3f | None = None):
+def transform_mesh(mesh: mi.Mesh,
+                   translation: mi.Point3f | None = None,
+                   rotation: mi.Point3f | None = None,
+                   scale: mi.Point3f | None = None):
     # pylint: disable=line-too-long
     r"""
     In-place transformation of a mesh by applying translation, rotation, and scaling
@@ -141,3 +141,36 @@ def transform_mesh(mesh : mi.Mesh,
 
     params["vertex_positions"] = dr.ravel(v)
     params.update()
+
+def remove_mesh_duplicate_vertices(mesh: mi.Mesh):
+    """
+    Remove duplicate vertices from a mesh
+
+    This function removes duplicate vertices from a Mitsuba mesh and updates
+    the face indices accordingly. It also updates texture coordinates and
+    recomputes vertex normals if present. The mesh is updated in place.
+
+    :param mesh: Mitsuba mesh from which to remove duplicate vertices
+    """
+
+    vertices = dr.unravel(mi.Point3f, mesh.vertex_positions_buffer()).numpy()
+    faces = dr.unravel(mi.Point3u, mesh.faces_buffer()).numpy()
+    texcoords = dr.unravel(mi.Vector2f, mesh.vertex_texcoords_buffer()).numpy()
+
+    # Find unique vertices and their indices
+    unique_vertices, unique_indices, inverse_indices\
+        = np.unique(vertices, axis=1, return_inverse=True, return_index=True)
+
+    # Update faces and texture coordinates to use new vertex indices
+    new_faces = inverse_indices[faces]
+
+    # Update the mesh
+    params = mi.traverse(mesh)
+    params["vertex_positions"] = dr.ravel(mi.Point3f(unique_vertices))
+    params["faces"] = dr.ravel(mi.Point3u(new_faces))
+    if mesh.has_vertex_texcoords():
+        new_texcoords = texcoords[:,unique_indices]
+        params["vertex_texcoords"] = dr.ravel(mi.Vector2f(new_texcoords))
+    params.update()
+    if mesh.has_vertex_normals():
+        mesh.recompute_vertex_normals()

@@ -30,6 +30,7 @@ def test_cfr_computation(synthetic_array):
     p_solver = PathSolver()
     paths = p_solver(scene, los=True, specular_reflection=True,
                     diffuse_reflection=False, refraction=False,
+                    diffraction=True, edge_diffraction=True,
                     synthetic_array=synthetic_array)
 
     sampling_frequency = 10**6
@@ -91,6 +92,7 @@ def test_cfr_normalization(synthetic_array):
     p_solver = PathSolver()
     paths = p_solver(scene, los=True, specular_reflection=True,
                     diffuse_reflection=False, refraction=False,
+                    diffraction=True, edge_diffraction=True,
                     synthetic_array=synthetic_array)
 
     sampling_frequency = 10**6

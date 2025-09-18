@@ -8,9 +8,11 @@ import mitsuba as mi
 import drjit as dr
 from typing import Tuple
 
-from sionna.rt.constants import InteractionType, MIN_SEGMENT_LENGTH
+from sionna.rt.constants import InteractionType, MIN_SEGMENT_LENGTH,\
+    NO_JONES_MATRIX
 from sionna.rt.utils import spawn_ray_from_sources, fibonacci_lattice,\
-    spawn_ray_to
+    spawn_ray_to, sample_wedge_diffraction_point, WedgeGeometry, hash_fnv1a,\
+    PlaneHasher, EdgeHasher
 from .sample_data import SampleData
 from .paths_buffer import PathsBuffer
 
@@ -43,6 +45,9 @@ class SBCandidateGenerator:
     collisions.
     """
 
+    # Probability of selecting a diffraction event from a valid wedge
+    DIFFRACTION_SAMPLING_PROBABILITY = 0.2
+
     # Specular chains are considered identical if they share the same
     # hash. An array is used to store the number of times that a hash has
     # been observed. If the counter is > 0, then the specular chain is not
@@ -57,19 +62,25 @@ class SBCandidateGenerator:
 
         # Sampler for generating random numbers
         self._sampler = mi.load_dict({'type': 'independent'})
+        self.plane_hash_functions = [PlaneHasher(op='round'),
+                                     PlaneHasher(op='floor')]
+        self.edge_hash_functions = [EdgeHasher(op='round'),
+                                    EdgeHasher(op='floor')]
 
     def __call__(self,
-                 mi_scene : mi.Scene,
-                 src_positions : mi.Point3f,
-                 tgt_positions : mi.Point3f,
-                 samples_per_src : int,
-                 max_num_paths_per_src : int,
-                 max_depth : int,
-                 los : bool,
-                 specular_reflection : bool,
-                 diffuse_reflection : bool,
-                 refraction : bool,
-                 seed : int = 1) -> PathsBuffer:
+                 mi_scene: mi.Scene,
+                 src_positions: mi.Point3f,
+                 tgt_positions: mi.Point3f,
+                 samples_per_src: int,
+                 max_num_paths_per_src: int,
+                 max_depth: int,
+                 los: bool,
+                 specular_reflection: bool,
+                 diffuse_reflection: bool,
+                 refraction: bool,
+                 diffraction: bool,
+                 edge_diffraction: bool,
+                 seed: int = 1) -> PathsBuffer:
         # pylint: disable=line-too-long
         r"""
         Instantiates the paths buffer and runs the candidate generator
@@ -84,9 +95,11 @@ class SBCandidateGenerator:
         :param specular_reflection: If set to `True`, then the specularly reflected paths are computed
         :param diffuse_reflection: If set to `True`, then the diffusely reflected paths are computed
         :param refraction: If set to `True`, then the refracted paths are computed
+        :param diffraction: If set to `True`, then the diffracted paths are computed
+        :param edge_diffraction: If set to `True`, then the diffraction on free floating edges is computed
         :param seed: Seed for the sampler. Defaults to 1.
 
-        :return : Candidate paths
+        :return: Candidate paths
         """
 
         num_sources = dr.shape(src_positions)[1]
@@ -99,7 +112,7 @@ class SBCandidateGenerator:
         # Allocate memory for `max_num_paths` paths.
         # After the shoot-and-bounce process, if the number of paths found is
         # below `max_num_paths`, then the tensors are shrinked.
-        paths = PathsBuffer(max_num_paths, max_depth)
+        paths = PathsBuffer(max_num_paths, max_depth, diffraction)
 
         # Counter indicating how many paths were found for each source.
         # To ensure that the path buffer is not filled by a single or a few
@@ -119,7 +132,8 @@ class SBCandidateGenerator:
             self._shoot_and_bounce(mi_scene, src_positions, tgt_positions,
                     paths, samples_per_src, max_num_paths_per_src, max_depth,
                     paths_counter_per_source, specular_reflection,
-                    diffuse_reflection, refraction)
+                    diffuse_reflection, refraction, diffraction,
+                    edge_diffraction)
 
         return paths
 
@@ -129,11 +143,11 @@ class SBCandidateGenerator:
 
     @dr.syntax
     def _los(self,
-             mi_scene : mi.Scene,
-             src_positions : mi.Point3f,
-             tgt_positions : mi.Point3f,
-             paths : PathsBuffer,
-             paths_counter_per_source : mi.UInt):
+             mi_scene: mi.Scene,
+             src_positions: mi.Point3f,
+             tgt_positions: mi.Point3f,
+             paths: PathsBuffer,
+             paths_counter_per_source: mi.UInt):
         # pylint: disable=line-too-long
         r"""
         Tests line-of-sight (LoS) paths and add non-obstructed ones to the
@@ -152,7 +166,7 @@ class SBCandidateGenerator:
         num_tgt = dr.width(tgt_positions)
 
         # Sample data
-        samples_data = SampleData(num_src, num_tgt, 0)
+        samples_data = SampleData(num_src, num_tgt, 0, True)
 
         # Target indices
         tgt_indices = dr.arange(mi.UInt, num_tgt)
@@ -179,92 +193,20 @@ class SBCandidateGenerator:
         dr.scatter_inc(paths_counter_per_source, samples_data.src_indices,
                        valid)
 
-    def _hash_shape_ptr(self, ptr : mi.ShapePtr) -> mi.UInt64:
-        r"""
-        Hashes a shape pointer to an unsigned integer
-
-        :param ptr: Pointer to a shape
-
-        :return: Hash value
-        """
-
-        h = dr.reinterpret_array(mi.UInt32, ptr)
-        h = mi.UInt64(h)
-        return h
-
-    def _cantor_pairing(self, s : mi.UInt, p : mi.UInt) -> mi.UInt:
-        r"""
-        Uniquely encodes two natural numbers into a single natural number using
-        the Cantor pairing function
-
-        :param s: First integer
-        :param p: Second integer
-
-        :return: Pairing function output
-        """
-
-        h = s*s + 3*s + 2*s*p + p + p*p
-        h //= 2
-        return h
-
-    def _hash_intersection(self,
-                           shape_ptr : mi.ShapePtr,
-                           prim_ind : mi.UInt,
-                           int_type : mi.UInt) -> mi.UInt:
-        r"""
-        Hashes a pointer to a shape, a primitive index, and an interaction type
-
-        :param shape_ptr: Pointer to a shape
-        :param prim_ind: Index of primitive
-        :param int_type: Intersection type
-
-        :return: Hash value
-        """
-
-        shape_hash = self._hash_shape_ptr(shape_ptr)
-        a = self._cantor_pairing(shape_hash + 1, prim_ind + 1)
-        inter_hash = self._cantor_pairing(a, int_type)
-        return inter_hash
-
-
-    def _polynomial_hashing(self,
-                            interaction_hash : mi.UInt,
-                            path_hash : mi.UInt) -> mi.UInt:
-        r"""
-        Updates the hash of a path ``path_hash`` with the interaction hash
-        ``interaction_hash`` using polynomial hashing, i.e.,
-
-        .. code-block:: python
-
-            hash[n] = hash[n-1]*p + i
-
-        where ``hash[n-1]`` is the provided path hash (``path_hash``),
-        ``hash[n]`` the returned updated path hash, ``i`` the interaction hash
-        (``interaction_hash``), and ``p`` a prime number
-
-        :param interaction_hash: Interaction hash
-        :param path_hash: Current path hash
-
-        :return: Updated path hash
-        """
-
-        prime = mi.UInt64(1373)
-        path_hash = path_hash*prime + interaction_hash
-
-        return path_hash
-
     def _shoot_and_bounce(self,
-                          mi_scene : mi.Scene,
-                          src_positions : mi.Point3f,
-                          tgt_positions : mi.Point3f,
-                          paths : PathsBuffer,
-                          samples_per_src : int,
-                          max_num_paths_per_src : int,
-                          max_depth : int,
-                          paths_counter_per_source : mi.UInt,
-                          specular_reflection : bool,
-                          diffuse_reflection : bool,
-                          refraction : bool):
+                          mi_scene: mi.Scene,
+                          src_positions: mi.Point3f,
+                          tgt_positions: mi.Point3f,
+                          paths: PathsBuffer,
+                          samples_per_src: int,
+                          max_num_paths_per_src: int,
+                          max_depth: int,
+                          paths_counter_per_source: mi.UInt,
+                          specular_reflection: bool,
+                          diffuse_reflection: bool,
+                          refraction: bool,
+                          diffraction: bool,
+                          edge_diffraction: bool):
         # pylint: disable=line-too-long
         r"""
         Executes shooting-and-bouncing of rays
@@ -282,48 +224,33 @@ class SBCandidateGenerator:
         :param specular_reflection: If set to `True`, then the specularly reflected paths are computed
         :param diffuse_reflection: If set to `True`, then the diffusely reflected paths are computed
         :param refraction: If set to `True`, then the refracted paths are computed
+        :param diffraction: If set to `True`, then the diffracted paths are computed
+        :param edge_diffraction: If set to `True`, then the diffraction on free floating edges is computed
         """
-
-        num_sources = dr.shape(src_positions)[1]
-
-        # Counter indicating how many occurrences of a specular chain was found.
-        # Specular chains are considered identical if they share the same
-        # hash. Taking the hash modulo the size of the following array is used
-        # to index this array and increment the counter. If the counter is > 0,
-        # then the specular chain is not considered as new and not stored.
-        # The size of the following array needs therefore to be large enough
-        # to ensure that the number of collisions stays low and that candidates
-        # are not discarded due to collisions.
-        # The size of the array is set to:
-        #  max(max_num_paths, MIN_SPEC_COUNTER_SIZE*num_sources)
-        spec_counter_size = dr.maximum(max_num_paths_per_src,
-                                       SBCandidateGenerator.MIN_SPEC_COUNT_SIZE)
-        specular_chain_counter = dr.zeros(mi.UInt,
-                                          spec_counter_size*num_sources)
 
         # Runs the shooting-and-bouncing of rays loop
         with dr.scoped_set_flag(dr.JitFlag.OptimizeLoops, False):
             self._shoot_and_bounce_loop(mi_scene, src_positions, tgt_positions,
                 samples_per_src, max_num_paths_per_src, max_depth, paths,
-                paths_counter_per_source, specular_chain_counter,
-                specular_reflection, diffuse_reflection, refraction,
-                self._sampler)
+                paths_counter_per_source, specular_reflection, diffuse_reflection,
+                refraction, diffraction, edge_diffraction, self._sampler)
 
     @dr.syntax
     def _shoot_and_bounce_loop(self,
-                               mi_scene : mi.Scene,
-                               src_positions : mi.Point3f,
-                               tgt_positions : mi.Point3f,
-                               samples_per_src : int,
-                               max_num_paths_per_src : int,
-                               max_depth : int,
-                               paths : PathsBuffer,
-                               paths_counter_per_source : mi.UInt,
-                               specular_chain_counter : mi.UInt,
-                               specular_reflection : bool,
-                               diffuse_reflection : bool,
-                               refraction : bool,
-                               sampler : mi.Sampler):
+                               mi_scene: mi.Scene,
+                               src_positions: mi.Point3f,
+                               tgt_positions: mi.Point3f,
+                               samples_per_src: int,
+                               max_num_paths_per_src: int,
+                               max_depth: int,
+                               paths: PathsBuffer,
+                               paths_counter_per_source: mi.UInt,
+                               specular_reflection_enabled: bool,
+                               diffuse_reflection_enabled: bool,
+                               refraction_enabled: bool,
+                               diffraction_enabled: bool,
+                               edge_diffraction_enabled: bool,
+                               sampler: mi.Sampler):
         # pylint: disable=line-too-long
         r"""
         Executes shooting-and-bouncing of rays
@@ -338,19 +265,21 @@ class SBCandidateGenerator:
         :param max_depth:  Maximum path depths
         :param paths: Buffer storing the candidate paths. Updated in-place.
         :param paths_counter_per_source: Counts the number of paths found for each source
-        :param specular_reflection: If set to `True`, then the specularly reflected paths are computed
-        :param diffuse_reflection: If set to `True`, then the diffusely reflected paths are computed
-        :param refraction: If set to `True`, then the refracted paths are computed
+        :param specular_reflection_enabled: If set to `True`, then the specularly reflected paths are computed
+        :param diffuse_reflection_enabled: If set to `True`, then the diffusely reflected paths are computed
+        :param refraction_enabled: If set to `True`, then the refracted paths are computed
+        :param diffraction_enabled: If set to `True`, then the diffracted paths are computed
+        :param edge_diffraction_enabled: If set to `True`, then the diffraction on free floating edges is computed
         :param sampler: Sampler used to generate pseudo-random numbers
         """
 
         num_sources = dr.shape(src_positions)[1]
         num_targets = dr.shape(tgt_positions)[1]
         num_samples = samples_per_src*num_sources
-        spec_counter_size = dr.shape(specular_chain_counter)[0]//num_sources
 
         # Structure storing the sample data, which is used to build the paths
-        samples_data = SampleData(num_sources, samples_per_src, max_depth)
+        samples_data = SampleData(num_sources, samples_per_src, max_depth,
+                                  diffraction_enabled)
 
         # Rays
         ray = spawn_ray_from_sources(fibonacci_lattice, samples_per_src,
@@ -367,7 +296,23 @@ class SBCandidateGenerator:
         # It is computed only for specular chains, and used to not duplicate
         # specular chain candidates.
         # 64bit integer is used for hashing.
-        path_hash = dr.zeros(mi.UInt64, num_samples)
+        # Multiple hash functions are used to mitigate the risk of different
+        # paths having the same hash due to quantization.
+        num_hashes = len(self.plane_hash_functions)
+        hashes = [dr.zeros(mi.UInt64, num_samples) for _ in range(num_hashes)]
+
+        # Counter indicating how many occurrences of a specular chain was found.
+        # Specular chains are considered identical if they share the same
+        # hash. Taking the hash modulo the size of the following array is used
+        # to index this array and increment the counter. If the counter is > 0,
+        # then the specular chain is not considered as new and not stored.
+        # The size of the following array needs therefore to be large enough
+        # to ensure that the number of collisions stays low and that candidates
+        # are not discarded due to collisions.
+        spec_counter_size = dr.maximum(max_num_paths_per_src,
+                                       SBCandidateGenerator.MIN_SPEC_COUNT_SIZE)
+        specular_chain_counters = [dr.zeros(mi.UInt, spec_counter_size*num_sources)
+                                   for _ in range(num_hashes)]
 
         # Current depth
         depth = dr.full(mi.UInt, 1, num_samples)
@@ -375,11 +320,29 @@ class SBCandidateGenerator:
         # Mask indicating which rays are active
         active = dr.full(mi.Mask, True, num_samples)
 
+        # Flag storing which types of interactions are locally enabled.
+        # The booleans specular_reflection_enabled, diffuse_reflection_enabled,
+        # etc. enable or disable interaction types globally.
+        # Globally enabled interaction types can however be locally disabled,
+        # i.e., disabled at the scale of a single path or intersection point.
+        # For example, diffuse reflections are disabled for a path if diffraction
+        # occurs. The following flag stores which interaction types are locally
+        # enabled. It is initialized using the globally enabled interaction types.
+        loc_en_inter = dr.full(mi.UInt, 0, num_samples)
+        if specular_reflection_enabled:
+            loc_en_inter |= InteractionType.SPECULAR
+        if diffuse_reflection_enabled:
+            loc_en_inter |= InteractionType.DIFFUSE
+        if refraction_enabled:
+            loc_en_inter |= InteractionType.REFRACTION
+        if diffraction_enabled:
+            loc_en_inter |= InteractionType.DIFFRACTION
+
         # Note: here and in the inner loop, we explicitly exclude some non-state
         # variables from the loop state so that DrJit doesn't have to trace
         # the loop body twice to figure it out.
         while dr.hint(active, label="shoot_and_bounce", exclude=[
-            specular_chain_counter,
+            specular_chain_counters,
             paths_counter_per_source,
         ]):
 
@@ -400,9 +363,14 @@ class SBCandidateGenerator:
             # Samples the radio material
             sample1 = sampler.next_1d()
             sample2 = sampler.next_2d()
-            s, n = self._sample_radio_material(si_scene, ray.d, sample1,
-                    sample2, specular_reflection, diffuse_reflection,
-                    refraction, active)
+            sample2_diffraction = sampler.next_2d()
+            s, n, wedges = self._sample_radio_material(si_scene, ray.o, ray.d,
+                                                       sample1, sample2,
+                                                       sample2_diffraction,
+                                                       loc_en_inter,
+                                                       diffraction_enabled,
+                                                       edge_diffraction_enabled,
+                                                       active)
             # Direction of propagation of scattered wave in implicit world
             # frame
             k_world = s.wo
@@ -413,19 +381,35 @@ class SBCandidateGenerator:
             # This happens if no interaction type is enabled
             active &= (int_type != InteractionType.NONE)
 
-            # Is this interaction a specular reflection?
+            # Flag indicating if the interaction is a specular reflection
             specular = int_type == InteractionType.SPECULAR
 
-            # Is this interaction a transmission
+            # Flag indicating if the interaction is a transmission
             transmission = int_type == InteractionType.REFRACTION
 
-            # Is this interaction a diffuse reflection
+            # Flag indicating if the interaction is a diffuse reflection
             diffuse = int_type == InteractionType.DIFFUSE
 
+            # Flag indicating if the interaction is a diffraction
+            diffraction = int_type == InteractionType.DIFFRACTION
+
+            # Only first order diffraction is supported.
+            # Therefore, we disable diffraction for future interactions
+            # if diffraction is sampled.
+            # Diffraction displaces the interaction point to an edge, which can
+            # invalidate specular reflections, transmissions, and diffractions
+            # that previously occurred. To avoid having to post-process path
+            # segments in addition to the specular suffix (e.g., using the
+            # image method), we disable paths that contain both diffuse and
+            # diffraction.
+            loc_en_inter[diffraction] &= ~(mi.UInt(InteractionType.DIFFUSE
+                                                   + InteractionType.DIFFRACTION))
+            loc_en_inter[diffuse] &= ~mi.UInt(InteractionType.DIFFRACTION)
+
             # Is the sample a specular chain?
-            # A specular chain consists only of specular reflections or
-            # transmission
-            specular_chain &= active & (specular | transmission)
+            # A specular chain consists only of specular reflections,
+            # or transmissions or diffractions
+            specular_chain &= active & (specular | transmission | diffraction)
 
             ########################################################
             # Update samples data
@@ -433,7 +417,8 @@ class SBCandidateGenerator:
 
             # Update the samples data
             samples_data.insert(depth, int_type, si_scene.shape,
-                                si_scene.prim_index, si_scene.p)
+                                si_scene.prim_index, wedges,
+                                si_scene.p, s.pdf, active)
 
             ########################################################
             # Store the paths.
@@ -442,21 +427,21 @@ class SBCandidateGenerator:
             # - It is valid, i.e., it connects to a target
             ########################################################
 
-            # If this path is a specular chain, then we hash it to ensure it
-            # is a new paths.
-            # Hash the interaction
-            inter_hash = self._hash_intersection(si_scene.shape,
-                                                 si_scene.prim_index,
-                                                 int_type)
-            # Hash of the path
-            path_hash = self._polynomial_hashing(inter_hash, path_hash)
+            # Encode the current plane as a 3D vector
+            for i in range(num_hashes):
+                plane_hash = self.plane_hash_functions[i](si_scene.n, si_scene.p)
+                edge_hash = self.edge_hash_functions[i](wedges.o,
+                                                        wedges.o + wedges.e_hat*wedges.length)
+                inter_hash = dr.select(int_type == InteractionType.SPECULAR, plane_hash, int_type)
+                inter_hash = dr.select(int_type == InteractionType.DIFFRACTION, edge_hash, inter_hash)
+                hashes[i] = hash_fnv1a(inter_hash, h=hashes[i])
 
             # Loop over all targets.
 
             # Target index
             t = mi.UInt(0)
             while dr.hint(t < num_targets, label="shoot_and_bounce_inner",
-                          exclude=[specular_chain_counter,
+                          exclude=[specular_chain_counters,
                                    paths_counter_per_source]):
                 # Position of the target with index t
                 tgt_position = dr.gather(mi.Point3f, tgt_positions, t)
@@ -492,19 +477,27 @@ class SBCandidateGenerator:
                 # be stored in the `path` structure, if its hash has not been
                 # already observed. To ensure that the path has not
                 # already been stored for the target `t`, we combine it with
-                # the path hash
-                # If the sample is a specular chain, then the counter
-                # corresponding to its hash is increased, and we check that the
-                # counter value previous to its increment equals 0.
-                path_target_hash = self._cantor_pairing(path_hash, t)
-                counter_ind = path_target_hash % spec_counter_size
-                counter_ind += spec_counter_size*samples_data.src_indices
-                samples_counter = dr.scatter_inc(specular_chain_counter,
-                                                 counter_ind, new_specular)
-                new_specular &= samples_counter == 0
+                # the path hash.
+                # We use several hash functions to mitigate the risk of slightly
+                # different paths having a different hash due to numerical precision issues.
+                # A path is considered as new if all hashes are new.
+                for i in range(num_hashes):
+                    path_target_hash = hash_fnv1a(t, h=hashes[i])
+                    counter_ind = path_target_hash % spec_counter_size
+                    counter_ind += spec_counter_size*samples_data.src_indices
+                    # If the sample is a specular chain, then the counter
+                    # corresponding to its hash is increased, and we check that the
+                    # counter value previous to its increment equals 0.
+                    # To avoid race conditions where 2 threads increment first one of
+                    # the counters and therefore neither is considered as new, it is
+                    # important to use `new_specular` as the active mask for this
+                    # operation. This way, only threads that are considered as new
+                    # *so far* will increment the next counter.
+                    samples_counter = dr.scatter_inc(specular_chain_counters[i],
+                                                     counter_ind, new_specular)
+                    new_specular &= samples_counter == 0
 
                 # Store the paths
-
                 store = active & (valid | new_specular)
 
                 # Increment the per source path counter
@@ -541,15 +534,17 @@ class SBCandidateGenerator:
             specular_chain |= diffuse
 
     def _sample_radio_material(self,
-                               si : mi.SurfaceInteraction3f,
-                               k_world : mi.Vector3f,
-                               sample1 : mi.Float,
-                               sample2 : mi.Point2f,
-                               specular_reflection : bool,
-                               diffuse_reflection : bool,
-                               refraction : bool,
-                               active : mi.Bool
-                               ) -> Tuple[mi.BSDFSample3f, mi.Normal3f]:
+                               si: mi.SurfaceInteraction3f,
+                               ray_origin: mi.Point3f,
+                               k_world: mi.Vector3f,
+                               sample1: mi.Float,
+                               sample2: mi.Point2f,
+                               sample2_diffraction: mi.Point2f,
+                               loc_en_inter: mi.UInt,
+                               diffraction_enabled: bool,
+                               edge_diffraction_enabled: bool,
+                               active: mi.Bool
+        ) -> Tuple[mi.BSDFSample3f, mi.Normal3f, WedgeGeometry]:
         # pylint: disable=line-too-long
         r"""
         Samples the radio material of the intersected object
@@ -558,16 +553,24 @@ class SBCandidateGenerator:
         radio material, calls it, and then returns its output.
 
         :param si: Information about the interaction
+        :param ray_origin: Origin of the ray
         :param k_world: Direction of propagation of the incident wave in the world frame
-        :param sample1: Random float uniformly distributed in :math:`[0,1]`. Used to sample the interaction type.
-        :param sample2: Random 2D point uniformly distributed in :math:`[0,1]^2`. Used to sample the direction of diffusely reflected waves.
-        :param specular_reflection: If set to `True`, then the specularly reflected paths are computed
-        :param diffuse_reflection: If set to `True`, then the diffusely reflected paths are computed
-        :param refraction: If set to `True`, then the refracted paths are computed
+        :param sample1: Random float uniformly distributed in :math:`[0,1]`.
+            Used to sample the interaction type.
+        :param sample2: Random 2D point uniformly distributed in :math:`[0,1]^2`.
+            Used to sample the direction of diffusely reflected waves.
+        :param sample2_diffraction: Random 2D point uniformly distributed in :math:`[0,1]^2`.
+            Used to project interaction point on an edge for diffraction and to sample diffraction
+            interaction type.
+        :param loc_en_inter: Bitmask indicating which interaction types are locally enabled
+        :param diffraction_enabled: If set to `True`, then the diffraction is enabled
+        :param edge_diffraction_enabled: If set to `True`, then the diffraction on free floating edges is computed
         :param active: Mask to specify active rays
 
-        :return: Sampling record
-        :return: Normal to the incident surface in the world frame
+        :return: Tuple containing:
+            - Sampling record
+            - Normal to the incident surface in the world frame
+            - Wedge geometry containing edge information
         """
 
         # Ensure the normal is oriented in the opposite of the direction of
@@ -577,23 +580,125 @@ class SBCandidateGenerator:
         si.initialize_sh_frame()
         si.n = normal_world
 
-        # Set `si.wi` to the direction of propagation of the incident wave in
-        # the local frame
+        # Specify the components that are required
+        ctx = mi.BSDFContext(mode=mi.TransportMode.Importance,
+                             type_mask=0, component=0)
+        # Computation of the Jones matrix is not needed
+        ctx.component |= NO_JONES_MATRIX
+        # If diffraction is globally disabled, we can avoid runing the related code
+        # to save computation time
+        if diffraction_enabled:
+            ctx.component |= InteractionType.DIFFRACTION
+
+        # If diffraction is enabled, the intersection point is projected on
+        # the silhouette to identify valid wedges for diffraction. Only valid
+        # wedges should be considered for diffraction by the radio material.
+        diffraction = mi.Bool(False)
+        probs = mi.Float(1)
+        diffr_point = mi.Point3f(0.0, 0.0, 0.0)
+        wedges = WedgeGeometry.build_with_size(1)
+        if diffraction_enabled:
+            loc_en_diffr = (loc_en_inter & InteractionType.DIFFRACTION) > 0
+            diffraction, probs, diffr_point, wedges = \
+                self._sample_diffraction_point(si, loc_en_inter,
+                                               ray_origin, k_world,
+                                               sample2_diffraction,
+                                               edge_diffraction_enabled,
+                                               active & loc_en_diffr)
+
+            # If diffraction is sampled, then update the interaction points
+            # to the diffraction points and the intersected primitives to the
+            # ones carrying the diffracting edges
+            si.p = dr.select(diffraction, diffr_point, si.p)
+            si.prim_index = dr.select(diffraction, wedges.prim0, si.prim_index)
+
+            # Set `si.wi` to the direction of propagation of the incident wave in
+            # the local frame
+            k_world = dr.select(diffraction,
+                                dr.normalize(diffr_point - ray_origin),
+                                k_world)
+
+            # Update locally enabled interactions according to the diffraction
+            # flag
+            loc_en_inter = dr.select(diffraction,
+                                    mi.UInt(InteractionType.DIFFRACTION),
+                                    loc_en_inter & ~mi.UInt(InteractionType.DIFFRACTION))
+
+            # `si.dn_du` stores the edge vector in the local frame
+            si.dn_du = si.to_local(wedges.e_hat)
+            # `si.dn_dv` stores the normal to the n-face in the local frame
+            si.dn_dv = si.to_local(wedges.nn)
+        else:
+            loc_en_inter &= ~mi.UInt(InteractionType.DIFFRACTION)
+
         si.wi = si.to_local(k_world)
 
-        # Specify the components that are required
-        component = 0
-        if specular_reflection:
-            component |= InteractionType.SPECULAR
-        if diffuse_reflection:
-            component |= InteractionType.DIFFUSE
-        if refraction:
-            component |= InteractionType.REFRACTION
-        ctx = mi.BSDFContext(mode=mi.TransportMode.Importance,
-                            type_mask=0,
-                            component=component)
+        # `si.dp_du` stores the path length from the diffraction point to the
+        # source, target, and the sampled local edge index. As the electric field
+        # is not needed here, we set the distances to the source and target to 1.
+        # It also stores the flags indicating the enabled interactions.
+        si.dp_du = mi.Vector3f(1.,
+                               1.,
+                               dr.reinterpret_array(mi.Float, loc_en_inter))
 
         # Samples the radio material
         sample, _ = si.bsdf().sample(ctx, si, sample1, sample2, active)
 
-        return sample, normal_world
+        # Update the probability of the event to be sampled
+        sample.pdf *= probs
+
+        return sample, normal_world, wedges
+
+    def _sample_diffraction_point(
+        self,
+        si: mi.SurfaceInteraction3f,
+        loc_en_inter: mi.UInt,
+        ray_origin: mi.Point3f,
+        ki_world: mi.Vector3f,
+        sample2: mi.Point2f,
+        edge_diffraction: bool,
+        active: bool | mi.Bool
+    ) -> tuple[mi.Bool, mi.Float, mi.Point3f, WedgeGeometry]:
+        # pylint: disable=line-too-long
+        r"""
+        Samples a diffraction point on the silhouette edge of a mesh from a surface interaction
+
+        This method identifies potential diffraction points by sampling along the silhouette
+        of the mesh.
+
+        :param si: Surface interaction
+        :param loc_en_inter: Bitmask indicating which interaction types are enabled
+        :param ray_origin: Origin of the ray
+        :param ki_world: Direction of propagation of the incident wave in the world frame
+        :param sample2: A pair of random numbers in :math:`[0,1]^2` used to project the interaction
+            point on an edge and to sample the diffraction interaction type
+        :param edge_diffraction: If set to `True`, then diffraction on free floating edges is computed
+        :param active: Mask indicating which rays are active
+
+        :return: A tuple containing:
+            - diffraction: Boolean mask indicating if a diffraction is sampled
+            - probs: Probability of selecting diffraction or other interactions
+            - diff_point: 3D position of the diffraction point on an edge
+            - wedges: Wedge geometry containing edge information
+        """
+
+        valid_wedge, wedges, diff_point = sample_wedge_diffraction_point(si,
+                                                                         ray_origin,
+                                                                         ki_world,
+                                                                         sample2.x,
+                                                                         edge_diffraction,
+                                                                         active)
+
+        # Only a predefined fixed ratio of valid wedges result in diffraction
+        # interactions. The remaining paths with valid wedges are associated
+        # with other interaction types.
+        select_threshold = dr.select(loc_en_inter == InteractionType.DIFFRACTION,
+                                     1.0, self.DIFFRACTION_SAMPLING_PROBABILITY)
+        diffraction = valid_wedge & (sample2.y < select_threshold)
+
+        # Probability of selecting diffraction or other interactions
+        probs = dr.select(diffraction, self.DIFFRACTION_SAMPLING_PROBABILITY,
+                          1. - self.DIFFRACTION_SAMPLING_PROBABILITY)
+        probs = dr.select(valid_wedge, probs, 1.0)
+
+        return diffraction, probs, diff_point, wedges

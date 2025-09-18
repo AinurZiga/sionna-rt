@@ -39,15 +39,15 @@ class Paths:
     """
 
     def __init__(self,
-                 scene : Scene,
-                 src_positions : mi.Point3f,
-                 tgt_positions : mi.Point3f,
-                 tx_velocities : mi.Vector3f,
-                 rx_velocities : mi.Vector3f,
-                 synthetic_array : bool,
-                 paths_buffer : PathsBuffer,
-                 rel_ant_positions_tx : mi.Point3f | None,
-                 rel_ant_positions_rx : mi.Point3f | None):
+                 scene: Scene,
+                 src_positions: mi.Point3f,
+                 tgt_positions: mi.Point3f,
+                 tx_velocities: mi.Vector3f,
+                 rx_velocities: mi.Vector3f,
+                 synthetic_array: bool,
+                 paths_buffer: PathsBuffer,
+                 rel_ant_positions_tx: mi.Point3f | None,
+                 rel_ant_positions_rx: mi.Point3f | None):
 
         self._paths_buffer = paths_buffer
 
@@ -224,7 +224,7 @@ class Paths:
     def a(self):
         # pylint: disable=line-too-long
         r"""
-        Real and imaginary components of the channel coefficients
+        Real and imaginary components of the channel coefficients [unitless, linear scale]
 
         :type: :py:class:`Tuple[mi.TensorXf [num_rx, num_rx_ant, num_tx, num_tx_ant, num_paths], mi.TensorXf [num_rx, num_rx_ant, num_tx, num_tx_ant, num_paths]]`
         """
@@ -388,7 +388,7 @@ class Paths:
         sampling_frequency: float = 1.,
         num_time_steps: int = 1,
         normalize_delays: bool = True,
-        reverse_direction : bool = False,
+        reverse_direction: bool = False,
         out_type: Literal["drjit", "jax", "numpy", "tf", "torch"] = "drjit"
     ):
         # pylint: disable=line-too-long
@@ -433,16 +433,16 @@ class Paths:
         :return:
             Real and imaginary components of the baseband equivalent channel
             coefficients :math:`a^{\text{b}}_{i}`
-        :return type: Shape : [num_rx, num_rx_ant, num_tx,
+        :return type: Shape: [num_rx, num_rx_ant, num_tx,
             num_tx_ant, num_paths, num_time_steps],
             Type: :py:class:`Tuple[mi.TensorXf, mi.TensorXf]`
             | :py:class:`np.array` | :py:class:`jax.array`
             | :py:class:`tf.Tensor` | :py:class:`torch.tensor`
 
         :return: Paths delays :math:`\tau_{i}` [s]
-        :return type: Shape : [num_rx, num_rx_ant, num_tx,
+        :return type: Shape: [num_rx, num_rx_ant, num_tx,
             num_tx_ant, num_paths] or [num_rx, num_tx, num_paths],
-            Type : :py:class:`mi.TensorXf`
+            Type: :py:class:`mi.TensorXf`
             | :py:class:`np.array` | :py:class:`jax.array`
             | :py:class:`tf.Tensor` | :py:class:`torch.tensor`
         """
@@ -531,7 +531,7 @@ class Paths:
         num_time_steps: int = 1,
         normalize: bool = False,
         normalize_delays: bool = True,
-        reverse_direction : bool = False,
+        reverse_direction: bool = False,
         out_type: Literal["drjit", "jax", "numpy", "tf", "torch"] = "drjit"
     ):
         r"""
@@ -593,7 +593,7 @@ class Paths:
         :return: Channel tap coefficients
         :return type: Shape: [num_rx, num_rx_ant, num_tx, num_tx_ant,
             num_time_steps, l_max - l_min + 1],
-            Type : :py:class:`Tuple[mi.TensorXf, mi.TensorXf]`
+            Type: :py:class:`Tuple[mi.TensorXf, mi.TensorXf]`
             | :py:class:`np.array` | :py:class:`jax.array`
             | :py:class:`tf.Tensor` | :py:class:`torch.tensor`
         """
@@ -663,7 +663,7 @@ class Paths:
         num_time_steps: int = 1,
         normalize_delays: bool = True,
         normalize: bool = False,
-        reverse_direction : bool = False,
+        reverse_direction: bool = False,
         out_type: Literal["drjit", "jax", "numpy", "tf", "torch"] = "drjit"
     ):
         r"""
@@ -712,9 +712,9 @@ class Paths:
         :return: Real and imaginary components of the baseband equivalent channel
             coefficients :math:`a^{\text{b}}_{i}`
 
-        :return type: Shape : [num_rx, num_rx_ant, num_tx, num_tx_ant,
+        :return type: Shape: [num_rx, num_rx_ant, num_tx, num_tx_ant,
             num_time_steps, num_frequencies],
-            Type : :py:class:`Tuple[mi.TensorXf`
+            Type: :py:class:`Tuple[mi.TensorXf`
             | :py:class:`np.array` | :py:class:`jax.array`
             | :py:class:`tf.Tensor` | :py:class:`torch.tensor`
         """
@@ -896,8 +896,8 @@ class Paths:
         self._doppler = doppler
 
     def _apply_synthetic_array(self,
-                               rel_ant_positions_tx : mi.Point3f | None,
-                               rel_ant_positions_rx : mi.Point3f | None
+                               rel_ant_positions_tx: mi.Point3f | None,
+                               rel_ant_positions_rx: mi.Point3f | None
                                ) -> None:
         r"""
         Applies the phase shifts to simulate the effect of a synthetic array
@@ -1246,7 +1246,7 @@ class Paths:
         return doppler
 
     def _reverse_direction(self,
-                           t_list : list[mi.TensorXf]) -> list[mi.TensorXf]:
+                           t_list: list[mi.TensorXf]) -> list[mi.TensorXf]:
         r"""
         Reverses the direction of the paths
 

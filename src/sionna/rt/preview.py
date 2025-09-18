@@ -4,6 +4,8 @@
 #
 """Previewer of Sionna RT"""
 
+import weakref
+
 import drjit as dr
 import mitsuba as mi
 import numpy as np
@@ -13,9 +15,10 @@ import pythreejs as p3s
 from IPython.display import display
 import matplotlib as mpl
 
-from .constants import InteractionType, LOS_COLOR, SPECULAR_COLOR, \
-    DIFFUSE_COLOR, REFRACTION_COLOR, INTERACTION_TYPE_TO_COLOR,\
-        DEFAULT_TRANSMITTER_COLOR, DEFAULT_RECEIVER_COLOR
+from .constants import InteractionType, LOS_COLOR, SPECULAR_COLOR,\
+    DIFFUSE_COLOR, REFRACTION_COLOR, DIFFRACTION_COLOR,\
+    INTERACTION_TYPE_TO_COLOR, DEFAULT_TRANSMITTER_COLOR,\
+    DEFAULT_RECEIVER_COLOR, DEFAULT_PICKER_COLOR
 from .utils import rotation_matrix, scene_scale
 
 
@@ -26,18 +29,18 @@ class Previewer:
 
     Input
     ------
-    scene : :class:`rt.Scene`
+    scene: :class:`rt.Scene`
         Scene to preview
 
-    resolution : [2], int
+    resolution: [2], int
         Size of the viewer figure.
         Defaults to (655,500).
 
-    fov : float
+    fov: float
         Field of view, in degrees.
         Defautls to 45 degrees.
 
-    background : str
+    background: str
         Background color in hex format prefixed by '#'.
         Defaults to '#87CEEB'.
     """
@@ -45,30 +48,34 @@ class Previewer:
     def __init__(self, scene, resolution=(655,500), fov=45.,
                  background='white'):
 
-        self._scene = scene
+        self._scene = weakref.ref(scene)
         self._disk_sprite = None
 
         # List of objects in the scene
         self._objects = []
         # Bounding box of the scene
         self._bbox = mi.ScalarBoundingBox3f()
+        # Properties of the clipping plane. We keep them as scene attributes
+        # so that clipping can be easy toggled on & off with a widget.
+        self._clipping_plane_offset: float | None = None
+        self._clipping_plane_orientation: tuple[float, float, float] = (0,0,-1)
 
         ####################################################
         # Setup the viewer
         ####################################################
 
         # Lighting
-        ambient_light = p3s.AmbientLight(intensity=0.80)
+        ambient_light = p3s.AmbientLight(intensity=0.90)
         camera_light = p3s.DirectionalLight(
             position=[0, 0, 0], intensity=0.25
         )
 
         # Camera & controls
         self._camera = p3s.PerspectiveCamera(
-            fov=fov, aspect=resolution[0]/resolution[1],
-            up=[0, 0, 1], far=10000,
-            children=[camera_light],
+            fov=fov, aspect=resolution[0] / resolution[1],
+            up=[0, 0, 1], children=[camera_light],
         )
+
         self._orbit = p3s.OrbitControls(
             controlling = self._camera
         )
@@ -82,13 +89,23 @@ class Previewer:
             width=resolution[0], height=resolution[1], antialias=True
         )
 
+        self._legend_labels: dict[str, widgets.HTML] = {}
+
+        self._picker_text = widgets.HTML(value="")
+        self._picker_mesh: p3s.Mesh | None = None
+        self._picker: p3s.Picker | None = None
+
         ####################################################
         # Plot the scene geometry
         ####################################################
         self.plot_scene()
 
-        # Finally, ensure the camera is looking at the scene
+        # Finally, ensure the camera is looking at the scene and that its
+        # far plane is far enough to avoid clipping the scene.
         self.center_view()
+        scene_bbox = self._scene().mi_scene.bbox()
+        scene_bbox.expand(self._camera.position)
+        self._camera.far = dr.clip(dr.norm(scene_bbox.extents()), 10000, 100000)
 
     def reset(self):
         """
@@ -101,6 +118,19 @@ class Previewer:
             else:
                 self._p3s_scene.remove(obj)
         self._objects = remaining
+
+    def display(self):
+        """Display the previewer and its companion widgets in a Jupyter
+        notebook."""
+
+        legend = widgets.VBox(
+            list(self._legend_labels.values()) + [self._picker_text],
+            layout=widgets.Layout(padding="0 0 0 5px")
+        )
+        display(widgets.HBox([self._renderer, legend]))
+
+        if self.clip_plane_enabled():
+            self.display_clipping_plane_slider()
 
     def redraw_scene_geometry(self):
         """
@@ -126,12 +156,10 @@ class Previewer:
         bbox = self._bbox if self._bbox.valid() else mi.ScalarBoundingBox3f(0.)
         center = bbox.center()
 
-        sc = scene_scale(self._scene)
-        if sc == 0.:
-            sc = 1.
-        r = sc*1.5
-        theta = np.pi*0.25
-        phi = np.pi*0.25
+        sc = self._scene_scale()
+        r = sc * 1.5
+        theta = np.pi * 0.25
+        phi = np.pi * 0.25
         position = (np.sin(theta) * np.cos(phi) * r + center.x,
                     np.sin(theta) * np.sin(phi) * r + center.y,
                     np.cos(theta) * r + center.z)
@@ -150,15 +178,12 @@ class Previewer:
 
         Input
         ------
-        show_orientations : bool
+        show_orientations: bool
             If set to `True`, the orientation of the radio device is shown using
             an arrow. Defaults to `False`.
         """
-        scene = self._scene
-        sc = scene_scale(scene)
-        # If scene is empty, set the scene scale to 1
-        if sc == 0.:
-            sc = 1.
+        scene = self._scene()
+        sc = self._scene_scale()
 
         tx_positions = [tx.position.numpy().T[0]
                         for tx in scene.transmitters.values()]
@@ -206,9 +231,9 @@ class Previewer:
                 self._plot_points(p[mask], persist=False, colors=albedo[mask],
                                   radius=r)
 
+        self._add_legend(category="devices")
+
         if show_orientations:
-            line_length = 0.05 * sc
-            head_length = 0.05 * line_length
             zeros = np.zeros((3,))
 
             for devices in [scene.transmitters.values(),
@@ -217,15 +242,22 @@ class Previewer:
                     continue
                 starts, ends, colors = [], [], []
                 for rd in devices:
+                    r = rd.display_radius or default_radius
+                    line_length = 1.5 * r
+                    head_length = 0.25 * r
+
                     # Arrow line
-                    color = f'rgb({", ".join([str(int(v)) for v in rd.color])})'
-                    starts.append(rd.position.numpy()[:,0])
+                    color = ", ".join([str(int(255 * v))
+                                       for v in rd.color])
+                    color = f'rgb({color})'
+                    rd_pos = rd.position.numpy().squeeze()
+                    starts.append(rd_pos)
                     rot_mat = rotation_matrix(rd.orientation)
                     local_endpoint = mi.Point3f(line_length, 0.0, 0.0)
-                    endpoint = rd.position + rot_mat@local_endpoint
-                    endpoint = endpoint.numpy()[:,0]
+                    endpoint = rd.position + rot_mat @ local_endpoint
+                    endpoint = endpoint.numpy().squeeze()
                     ends.append(endpoint)
-                    colors.append([rd.color[0], rd.color[1], rd.color[2]])
+                    colors.append(list(rd.color))
 
                     geo = p3s.CylinderGeometry(
                         radiusTop=0, radiusBottom=0.3 * head_length,
@@ -233,11 +265,13 @@ class Previewer:
                         heightSegments=0, openEnded=False)
                     mat = p3s.MeshLambertMaterial(color=color)
                     mesh = p3s.Mesh(geo, mat)
-                    mesh.position = (endpoint[0], endpoint[1], endpoint[2])
-                    angles = rd.orientation.numpy()[:,0]
-                    mesh.rotateZ(angles[2] - np.pi/2)
-                    mesh.rotateY(angles[0])
-                    mesh.rotateX(-angles[1])
+
+                    line_dir = dr.normalize(endpoint - rd_pos)
+                    mesh.lookAt(tuple(line_dir))
+                    mesh.rotateX(0.5 * np.pi)
+
+                    mesh.position = tuple(endpoint)
+
                     self._add_child(mesh, zeros, zeros, persist=False)
 
                 self._plot_lines(np.array(starts), np.array(ends),
@@ -249,10 +283,10 @@ class Previewer:
 
         Input
         -----
-        paths : :class:`~rt.Paths`
+        paths: :class:`~rt.Paths`
             Paths to plot
 
-        line_width : float
+        line_width: float
             Width of the lines.
             Defaults to 0.8.
         """
@@ -356,9 +390,11 @@ class Previewer:
 
         self._plot_lines(np.vstack(starts), np.vstack(ends),
                          np.vstack(colors), line_width)
+        self._add_legend(category="paths")
 
     def plot_planar_radio_map(self, radio_map, tx=0, db_scale=True,
-                              vmin=None, vmax=None, metric="path_gain"):
+                              vmin=None, vmax=None, metric="path_gain",
+                              cmap=None):
         """
         Plot the coverage map as a textured rectangle in the scene. Regions
         where the coverage map is zero-valued are made transparent.
@@ -374,10 +410,10 @@ class Previewer:
             return
 
         # Create a rectangle from two triangles
-        p00 = to_world.transform_affine([-1, -1, 0]).numpy().T[0]
-        p01 = to_world.transform_affine([1, -1, 0]).numpy().T[0]
-        p10 = to_world.transform_affine([-1, 1, 0]).numpy().T[0]
-        p11 = to_world.transform_affine([1, 1, 0]).numpy().T[0]
+        p00 = (to_world @ [-1, -1, 0]).numpy().T[0]
+        p01 = (to_world @ [1, -1, 0]).numpy().T[0]
+        p10 = (to_world @ [-1, 1, 0]).numpy().T[0]
+        p11 = (to_world @ [1, 1, 0]).numpy().T[0]
 
         vertices = np.array([p00, p01, p10, p11])
         pmin = np.min(vertices, axis=0)
@@ -401,7 +437,7 @@ class Previewer:
         )
 
         to_map, normalizer, color_map = self._coverage_map_color_mapping(
-            tensor, db_scale=db_scale, vmin=vmin, vmax=vmax)
+            tensor, db_scale=db_scale, vmin=vmin, vmax=vmax, cmap=cmap)
         texture = color_map(normalizer(to_map)).astype(np.float32)
         texture[:, :, 3] = non_zero_mask.astype(np.float32)
         # Pre-multiply alpha
@@ -425,7 +461,8 @@ class Previewer:
 
 
     def plot_mesh_radio_map(self, radio_map, tx=0, db_scale=True,
-                            vmin=None, vmax=None, metric="path_gain"):
+                            vmin=None, vmax=None, metric="path_gain",
+                            cmap=None):
         """
         Plots the mesh radio map
         """
@@ -456,7 +493,7 @@ class Previewer:
 
         # Mesh color from the radio map
         to_map, normalizer, color_map = self._coverage_map_color_mapping(
-            tensor, db_scale=db_scale, vmin=vmin, vmax=vmax)
+            tensor, db_scale=db_scale, vmin=vmin, vmax=vmax, cmap=cmap)
         colors = color_map(normalizer(to_map)).astype(np.float32)
         colors = colors[:,:3]
         colors = colors[non_zero_mask]
@@ -478,7 +515,7 @@ class Previewer:
         """
         Plots the meshes that make the scene
         """
-        objects = self._scene.objects.values()
+        objects = self._scene().objects.values()
         n = len(objects)
         if n <= 0:
             return
@@ -509,7 +546,7 @@ class Previewer:
             faces.append(f + f_offset)
             f_offset += n_vertices
 
-            albedo = np.array(s.bsdf().radio_material.color)
+            albedo = np.array(s.bsdf().color)
 
             albedos.append(np.tile(albedo, (n_vertices, 1)))
 
@@ -533,60 +570,179 @@ class Previewer:
 
         Input
         -----
-        offset : float
+        offset: float
             Offset to position the plane
 
-        clip_plane_orientation : tuple[float, float, float]
+        clip_plane_orientation: tuple[float, float, float]
             Normal vector of the clipping plane
         """
+        self._clipping_plane_offset = offset
+        self._clipping_plane_orientation = orientation
 
+        renderer = self._renderer
         if offset is None:
-            self._renderer.localClippingEnabled = False
-            self._renderer.clippingPlanes = []
+            renderer.localClippingEnabled = False
+            renderer.clippingPlanes = []
         else:
-            self._renderer.localClippingEnabled = True
-            self._renderer.clippingPlanes = [p3s.Plane(orientation, offset)]
+            renderer.localClippingEnabled = True
+            # Reuse the existing plane if possible
+            planes = renderer.clippingPlanes
+            if len(planes) > 0:
+                planes[0].constant = offset
+                planes[0].normal = orientation
+            else:
+                renderer.clippingPlanes = [p3s.Plane(orientation, offset)]
 
-    def show_legend(self, show_paths, show_devices):
-        r"""
-        Display the legend
+    def display_clipping_plane_slider(self):
+        renderer = self._renderer
+
+        # Figure out the minimum and maximum plane offsets given the current
+        # plane orientation and the scene's bounding box.
+        bbox = self._bbox
+        plane_normal = mi.Vector3f(self._clipping_plane_orientation)
+        offset_min, offset_max = 0, 0
+        for i in range(8):
+            c = bbox.corner(i)
+            # We need to negate the dot product because the plane is the set of
+            # points x such that: dot(x, plane_normal) + offset = 0
+            v = -dr.dot(c, plane_normal)
+            offset_min = dr.minimum(offset_min, v)
+            offset_max = dr.maximum(offset_max, v)
+        offset_min = offset_min.numpy()[0]
+        offset_max = offset_max.numpy()[0]
+
+        # Extend the range slightly to avoid potential overlap of the floor
+        # with the clipping plane.
+        diff = 0.01 * (offset_max - offset_min)
+        offset_min -= diff
+        offset_max += diff
+
+        label = widgets.Label(
+            "Clipping plane",
+            layout=widgets.Layout(flex='2 2 auto', width='auto')
+        )
+        checkbox = widgets.Checkbox(
+            value=True,
+            layout=widgets.Layout(flex='1 1 auto', width='auto')
+        )
+        slider = widgets.FloatSlider(
+            min=offset_min, max=offset_max, step=0.01,
+            value=self._clipping_plane_offset,
+            layout=widgets.Layout(flex='10 5 auto', width='auto')
+        )
+
+        def toggle_clipping_plane(change):
+            enabled = change['new']
+            slider.disabled = not enabled
+            offset = np.clip(slider.value, offset_min, offset_max)
+            self.set_clipping_plane(offset=offset if enabled else None,
+                                   orientation=self._clipping_plane_orientation)
+
+        def update_clipping_plane(change):
+            offset = change['new']
+            offset = np.clip(offset, offset_min, offset_max)
+            self.set_clipping_plane(offset=offset if checkbox.value else None,
+                                   orientation=self._clipping_plane_orientation)
+
+        checkbox.observe(toggle_clipping_plane, names='value')
+        slider.observe(update_clipping_plane, names='value')
+
+        layout = widgets.Layout(width=f'{renderer.width}px')
+        display(widgets.HBox([label, checkbox, slider], layout=layout))
+
+    def setup_point_picker(self):
+        """
+        Setup a widget that allows picking a point in the scene with
+        alt + click. The coordinates of the selected points are displayed
+        next to the previewer.
         """
 
-        def circular_item(color):
-            r = int(color[0]*255)
-            g = int(color[1]*255)
-            b = int(color[2]*255)
-            s = f"background-color: rgb({r},{g},{b}); width: 20px; height:" + \
-                 " 20px; border-radius: 50%; display: inline-block;"
-            return s
+        # --- Prepare sphere that will be displayed at the picked point
+        # Use the display radius of the first radio device from the scene
+        for rd in (list(self._scene().transmitters.values())
+                             + list(self._scene().receivers.values())):
+            if rd.display_radius is not None:
+                display_radius = 0.5 * rd.display_radius
+                break
+        else:
+            sc = self._scene_scale()
+            display_radius = max(0.005 * sc, 1)
 
-        def segment_item(color):
-            r = int(color[0]*255)
-            g = int(color[1]*255)
-            b = int(color[2]*255)
-            s = f"background-color: rgb({r},{g},{b}); width: 20px; height:" + \
-                 " 2px; display: inline-block;"
-            return s
+        self._picker_mesh = p3s.Mesh(
+            geometry=p3s.SphereGeometry(
+                radius=display_radius,
+                widthSegments=16,
+                heightSegments=8
+            ),
+            material=p3s.MeshLambertMaterial(
+                color=rgb_to_html(DEFAULT_PICKER_COLOR)
+            ),
+            position=(0, 0, 0)
+        )
+        self._picker_mesh.visible = False
+        self._p3s_scene.add(self._picker_mesh)
 
-        # Create a legend
-        legend_items = []
-        if show_paths:
-            legend_items += [
-                ("Line-of-sight", segment_item(LOS_COLOR)),
-                ("Specular reflection", segment_item(SPECULAR_COLOR)),
-                ("Diffuse reflection", segment_item(DIFFUSE_COLOR)),
-                ("Refraction", segment_item(REFRACTION_COLOR))]
-        if show_devices:
-            legend_items += [
-                ("Transmitter", circular_item(DEFAULT_TRANSMITTER_COLOR)),
-                ("Receiver", circular_item(DEFAULT_RECEIVER_COLOR))]
+        # --- Picker callback
+        def on_picked(change):
+            picker = self._picker
+            # Only respond to alt + click
+            if not picker.modifiers or not picker.modifiers[2]:
+                return
 
-        legend_labels = [widgets.HTML(
-            value=f"<div style='{style}'></div> {label}")
-                         for label, style in legend_items]
-        legend = widgets.VBox(legend_labels)
-        # Display the renderer and legend together
-        display(widgets.HBox([self._renderer, legend]))
+            new_point = None
+            if self.clip_plane_enabled() and (picker.object is not None):
+                # If clipping is enabled, we need to use the first point that
+                # lies beyond the clipping plane.
+
+                # Ray pointing from the camera to the picked point
+                camera_pos = mi.Point3f(self._camera.position)
+                first_point = mi.Point3f(self._picker.point)
+                ray = mi.Ray3f(o=camera_pos,
+                               d=dr.normalize(first_point - camera_pos))
+
+                # Intersect with the clipping plane
+                hit, clip_plane_dist, from_above = ray_plane_intersect(
+                    ray, dr.normalize(
+                        mi.ScalarNormal3f(self._clipping_plane_orientation)
+                    ), self._clipping_plane_offset
+                )
+                if not hit:
+                    # Easy case: the first picked point is already beyond the
+                    # clipping plane.
+                    new_point = change['new']
+                else:
+                    # Find the first point whose distance is further than
+                    # the ray-plane intersection.
+                    for info in picker.picked:
+                        candidate = info['point']
+                        distance = dr.norm(candidate - ray.o)
+                        if (from_above and distance > clip_plane_dist) \
+                           or (not from_above and distance < clip_plane_dist):
+                            new_point = candidate
+                            break
+            else:
+                new_point = change['new']
+
+            if (picker.object is None) or new_point is None:
+                # Clicked outside of the scene, hide the point
+                self._picker_text.value = ""
+                self._picker_mesh.visible = False
+                return
+
+            self._picker_mesh.visible = True
+            self._picker_mesh.position = new_point
+            self._picker_text.value = \
+                '<div style="display: inline-block;width: 30px;"></div>' \
+                f'({new_point[0]:.3f}, {new_point[1]:.3f}, {new_point[2]:.3f})'
+
+        # --- Setup the actual control and display an entry in the legend
+        self._picker = p3s.Picker(controlling=self._p3s_scene,
+                                  event='mousedown', all=True)
+        self._picker.observe(on_picked, names='point')
+        self._renderer.controls = self._renderer.controls + [self._picker]
+        self._add_legend(category="picker")
+        self._picker_text.value = ""
+
 
     ##################################################
     # Accessors
@@ -595,7 +751,7 @@ class Previewer:
     @property
     def resolution(self) -> tuple[int, int]:
         """
-        (float, float) : Rendering resolution `(width, height)`
+        (float, float): Rendering resolution `(width, height)`
         """
         return (self._renderer.width, self._renderer.height)
 
@@ -607,6 +763,9 @@ class Previewer:
     def orbit(self) -> p3s.OrbitControls:
         return self._orbit
 
+    def clip_plane_enabled(self) -> bool:
+        return len(self._renderer.clippingPlanes) > 0
+
     ##################################################
     # Internal methods
     ##################################################
@@ -615,16 +774,17 @@ class Previewer:
         """
         Returns the size of the scene, i.e., the diameter of the smallest
         sphere containing all the scene objects and centered at the center
-        of the scene
+        of the scene.
+        If the scene is empty, the scene scale is arbitrarily set to 1.
 
         Output
         -------
         : float
             Scene size
         """
-        bbox = self._scene.mi_scene.bbox()
-
-        sc = 2. * bbox.bounding_sphere().radius
+        sc = scene_scale(self._scene())
+        if sc == 0.:
+            sc = 1.
         return sc
 
     def _plot_mesh(self, vertices, faces, persist, colors=None):
@@ -633,17 +793,17 @@ class Previewer:
 
         Input
         ------
-        vertices : [n,3], float
+        vertices: [n,3], float
             Position of the vertices
 
-        faces : [n,3], int
+        faces: [n,3], int
             Indices of the triangles associated with ``vertices``
 
-        persist : bool
+        persist: bool
             Flag indicating if the mesh is persistent, i.e., should not be
             erased when ``reset()`` is called.
 
-        colors : [n,3] | [3] | None
+        colors: [n,3] | [3] | None
             Colors of the vertices. If `None`, black is used.
             Defaults to `None`.
         """
@@ -689,17 +849,17 @@ class Previewer:
 
         Input
         -------
-        points : [n, 3], float
+        points: [n, 3], float
             Coordinates of the `n` points.
 
-        persist : bool
+        persist: bool
             Indicates if the points are persistent, i.e., should not be erased
             when ``reset()`` is called.
 
-        colors : [n, 3], float | [3], float | None
+        colors: [n, 3], float | [3], float | None
             Colors of the points.
 
-        radius : float
+        radius: float
             Radius of the points.
         """
         assert points.ndim == 2 and points.shape[1] == 3
@@ -737,16 +897,16 @@ class Previewer:
 
         Input
         ------
-        obj : :class:`~pythreejs.Mesh`
+        obj: :class:`~pythreejs.Mesh`
             Mesh to display
 
-        pmin : [3], float
+        pmin: [3], float
             Lowest position for the bounding box
 
-        pmax : [3], float
+        pmax: [3], float
             Highest position for the bounding box
 
-        persist : bool
+        persist: bool
             Flag that indicates if the object is persistent, i.e., if it should
             be removed from the display when `reset()` is called.
         """
@@ -756,22 +916,71 @@ class Previewer:
         self._bbox.expand(pmin)
         self._bbox.expand(pmax)
 
+    def _add_legend(self, category: str):
+        r"""
+        Add an entry to the legend.
+        """
+
+        def circular_item(color):
+            #pylint: disable=unnecessary-semicolon
+            s = f"background-color: {rgb_to_html(color)};" \
+                " width: 20px; height: 20px; border-radius: 50%;" \
+                " margin-right: 5px; display: inline-block;" \
+                " vertical-align: text-bottom;"
+            return s
+
+        def segment_item(color):
+            #pylint: disable=unnecessary-semicolon
+            s = f"background-color: {rgb_to_html(color)};" \
+                " width: 20px; height: 2px;" \
+                " margin-right: 5px; display: inline-block;" \
+                " vertical-align: middle;"
+            return s
+
+        # Create a legend
+        legend_items = []
+        if category == "paths":
+            legend_items += [
+                ("Line-of-sight", segment_item(LOS_COLOR)),
+                ("Specular reflection", segment_item(SPECULAR_COLOR)),
+                ("Diffuse reflection", segment_item(DIFFUSE_COLOR)),
+                ("Refraction", segment_item(REFRACTION_COLOR)),
+                ("Diffraction", segment_item(DIFFRACTION_COLOR))
+            ]
+        elif category == "devices":
+            legend_items += [
+                ("Transmitter", circular_item(DEFAULT_TRANSMITTER_COLOR)),
+                ("Receiver", circular_item(DEFAULT_RECEIVER_COLOR))
+            ]
+        elif category == "picker":
+            legend_items += [
+                ("Picked point (select with Alt + Click)",
+                 circular_item(DEFAULT_PICKER_COLOR)),
+            ]
+        else:
+            raise ValueError(f"Invalid legend category: {category}")
+
+        self._legend_labels.update({
+            label: widgets.HTML(value=f"<div style='{style}'></div> {label}")
+            for label, style in legend_items
+        })
+
     def _plot_lines(self, starts, ends, colors, width):
         """
         Plots a set of `n` lines. This is used to plot the paths.
 
         Input
         ------
-        starts : [n, 3], float
+        starts: [n, 3], float
             Coordinates of the lines starting points
 
-        ends : [n, 3], float
+        ends: [n, 3], float
             Coordinates of the lines ending points
 
-        color : str
+        color: str
             Color of the lines.
 
-        width : float
+        width: float
             Width of the lines.
         """
 
@@ -843,7 +1052,7 @@ class Previewer:
         return html
 
     def _coverage_map_color_mapping(self, coverage_map, db_scale=True,
-                                    vmin=None, vmax=None):
+                                    vmin=None, vmax=None, cmap=None):
         """
         Prepare a Matplotlib color maps and normalizing helper based on the
         requested value scale to be displayed.
@@ -861,5 +1070,47 @@ class Previewer:
         if vmax is None:
             vmax = coverage_map[valid].max()
         normalizer = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
-        color_map = mpl.colormaps.get_cmap('viridis')
+        if cmap is None:
+            color_map = mpl.colormaps.get_cmap('viridis')
+        elif isinstance(cmap, str):
+            color_map = mpl.colormaps.get_cmap(cmap)
+        else:
+            color_map = cmap
         return coverage_map, normalizer, color_map
+
+
+def rgb_to_html(rgb: tuple[float, float, float]) -> str:
+    """
+    Convert an RGB tuple to an HTML color string.
+    """
+    return f"rgb({int(rgb[0] * 255)}, {int(rgb[1] * 255)}, {int(rgb[2] * 255)})"
+
+
+def ray_plane_intersect(
+        ray: mi.Ray3f, plane_normal: mi.ScalarNormal3f, plane_offset: float
+    ) -> tuple[bool, float | None, mi.Point3f | None]:
+    """Ray-plane intersection helper.
+
+    Returns:
+        hit: bool
+            True if the ray intersects the plane, False otherwise
+        t: float | None
+            Intersection distance, or None if no intersection
+        above: bool | None
+            True if the ray approaches the plane from above (according to the
+            given plane normal).
+    """
+    # Plane equation: dot(normal, point) = offset
+    # Ray equation: point = origin + t * direction
+    # Intersection: dot(normal, origin + t * direction) = offset
+    # Solving for t: t = (offset - dot(normal, origin)) / dot(normal, direction)
+    normal_dot_origin = dr.dot(plane_normal, ray.o)
+    normal_dot_direction = dr.dot(plane_normal, ray.d)
+
+    if abs(normal_dot_direction) <= 1e-6:
+        # Ray is parallel to plane, no intersection
+        return False, None, False
+
+    # Intersection
+    t = (-plane_offset - normal_dot_origin) / normal_dot_direction
+    return bool(t >= 0.), t, bool(normal_dot_direction > 0.)

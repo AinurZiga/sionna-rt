@@ -58,7 +58,7 @@ class SlicedPathIntegrator(RBIntegrator):
                scene: mi.Scene,
                sampler: mi.Sampler,
                ray: mi.Ray3f,
-               δL: mi.Spectrum | None, # pylint: disable=non-ascii-name
+               δL: mi.Spectrum | None, # pylint: disable=non-ascii-name,invalid-name
                state_in: mi.Spectrum | None,
                active: mi.Bool,
                **_ # Absorbs unused arguments

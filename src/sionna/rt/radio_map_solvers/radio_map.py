@@ -13,6 +13,7 @@ from abc import ABC, abstractmethod
 
 from sionna.rt.utils import watt_to_dbm, log10
 from sionna.rt.scene import Scene
+from sionna.rt.utils import WedgeGeometry, theta_phi_from_unit_vec
 
 
 class RadioMap(ABC):
@@ -26,36 +27,27 @@ class RadioMap(ABC):
     :param scene: Scene for which the radio map is computed
     """
 
-    def __init__(self, scene : Scene):
+    def __init__(self, scene: Scene):
 
         self._thermal_noise_power = scene.thermal_noise_power
         self._wavelength = scene.wavelength
 
         # Positions of the transmitters
-        tx_positions_x = mi.Float([tx.position.x[0]
-                                for tx in scene.transmitters.values()])
-        tx_positions_y = mi.Float([tx.position.y[0]
-                                for tx in scene.transmitters.values()])
-        tx_positions_z = mi.Float([tx.position.z[0]
-                                for tx in scene.transmitters.values()])
-        self._tx_positions = mi.Point3f(tx_positions_x,
-                                        tx_positions_y,
-                                        tx_positions_z)
+        transmitters = list(scene.transmitters.values())
+        self._tx_positions = mi.Point3f(
+            [tx.position.x[0] for tx in transmitters],
+            [tx.position.y[0] for tx in transmitters],
+            [tx.position.z[0] for tx in transmitters]
+        )
 
         # Powers of the transmitters
-        self._tx_powers = mi.Float([tx.power[0]
-                                    for tx in scene.transmitters.values()])
+        self._tx_powers = mi.Float([tx.power[0] for tx in transmitters])
 
         # Positions of the receivers
-        rx_positions_x = mi.Float([rx.position.x[0]
-                                for rx in scene.receivers.values()])
-        rx_positions_y = mi.Float([rx.position.y[0]
-                                for rx in scene.receivers.values()])
-        rx_positions_z = mi.Float([rx.position.z[0]
-                                for rx in scene.receivers.values()])
-        self._rx_positions = mi.Point3f(rx_positions_x,
-                                        rx_positions_y,
-                                        rx_positions_z)
+        receivers = list(scene.receivers.values())
+        self._rx_positions = mi.Point3f([rx.position.x[0] for rx in receivers],
+                                        [rx.position.y[0] for rx in receivers],
+                                        [rx.position.z[0] for rx in receivers])
 
         # Sampler used to randomly sample user positions using
         # sample_positions()
@@ -64,8 +56,8 @@ class RadioMap(ABC):
     @property
     @abstractmethod
     def measurement_surface(self):
-        r"""Mitsuba rectangle corresponding to the
-        radio map measurement plane
+        r"""Mitsuba shape corresponding to the
+        radio map measurement surface
 
         :type: :py:class:`mi.Shape`
         """
@@ -109,7 +101,8 @@ class RadioMap(ABC):
     @property
     @abstractmethod
     def path_gain(self):
-        r"""Path gains across the radio map from all transmitters
+        # pylint: disable=line-too-long
+        r"""Path gains across the radio map from all transmitters [unitless, linear scale]
 
         The shape of the tensor depends on the subclass.
 
@@ -119,44 +112,57 @@ class RadioMap(ABC):
         raise NotImplementedError("RadioMap is an abstract class")
 
     @abstractmethod
-    def add(
+    def add_paths(
         self,
-        e_fields : mi.Vector4f,
-        solid_angle : mi.Float,
-        array_w : List[mi.Float],
-        si_mp : mi.SurfaceInteraction3f,
-        k_world : mi.Vector3f,
-        tx_indices : mi.UInt,
-        hit : mi.Bool
-        ) -> None:
+        e_fields: mi.Vector4f,
+        array_w: List[mi.Float],
+        si: mi.SurfaceInteraction3f,
+        k_world: mi.Vector3f,
+        tx_indices: mi.UInt,
+        active: mi.Bool,
+        diffracted_paths: bool,
+        solid_angle: mi.Float | None = None,
+        tx_positions: mi.Point3f | None = None,
+        wedges: WedgeGeometry | None = None,
+        diff_point: mi.Point3f | None = None,
+        wedges_samples_cnt: mi.UInt | None = None):
+        # pylint: disable=line-too-long
         r"""
-        Adds the contribution of the rays that hit the measurement plane to the
-        radio maps
+        Adds the contribution of the paths that hit the measurement surface
+        to the radio maps
 
         The radio maps are updated in place.
 
         :param e_fields: Electric fields as real-valued vectors of dimension 4
-        :param solid_angle: Ray tubes solid angles [sr]
         :param array_w: Weighting used to model the effect of the transmitter
             array
-        :param si_mp: Informations about the interaction with the measurement
-            plane
-        :param k_world: Directions of propagation of the rays
-        :param tx_indices: Indices of the transmitters from which the rays
-            originate
-        :param hit: Flags indicating if the rays hit the measurement plane
+        :param si: Informations about the interaction with the measurement
+            surface
+        :param k_world: Directions of propagation of the incident paths
+        :param tx_indices: Indices of the transmitters from which the rays originate
+        :param active: Flags indicating if the paths should be added to the radio map
+        :param diffracted_paths: Flags indicating if the paths are diffracted
+        :param solid_angle: Ray tubes solid angles [sr] for non-diffracted paths.
+            Not required for diffracted paths.
+        :param tx_positions: Positions of the transmitters
+        :param wedges: Properties of the intersected wedges.
+            Not required for non-diffracted paths.
+        :param diff_point: Position of the diffraction point on the wedge.
+            Not required for non-diffracted paths.
+        :param wedges_samples_cnt: Number of samples on the wedge.
+            Not required for non-diffracted paths.
         """
         raise NotImplementedError("RadioMap is an abstract class")
 
     @abstractmethod
-    def finalize(self) -> None:
+    def finalize(self):
         r"""Finalizes the computation of the radio map"""
         raise NotImplementedError("RadioMap is an abstract class")
 
     @property
     def rss(self):
         r"""Received signal strength (RSS) across the radio map from all
-        transmitters
+        transmitters [W]
 
         The shape of the tensor depends on the subclass.
 
@@ -171,7 +177,8 @@ class RadioMap(ABC):
 
     @property
     def sinr(self):
-        r"""SINR across the radio map from all transmitters
+        # pylint: disable=line-too-long
+        r"""SINR across the radio map from all transmitters [unitless, linear scale]
 
         The shape of the tensor depends on the subclass.
 
@@ -197,7 +204,7 @@ class RadioMap(ABC):
         sinr_map = rss / (interference + noise)
         return sinr_map
 
-    def tx_association(self, metric : str = "path_gain") -> mi.TensorXi:
+    def tx_association(self, metric: str = "path_gain") -> mi.TensorXi:
         r"""Computes cell-to-transmitter association.
 
         Each cell is associated with the transmitter providing the highest
@@ -237,14 +244,14 @@ class RadioMap(ABC):
 
     def sample_cells(
         self,
-        num_cells : int,
-        metric : str = "path_gain",
-        min_val_db : float | None = None,
-        max_val_db : float | None = None,
-        min_dist : float | None = None,
-        max_dist : float | None = None,
-        tx_association : bool = True,
-        seed : int = 1
+        num_cells: int,
+        metric: str = "path_gain",
+        min_val_db: float | None = None,
+        max_val_db: float | None = None,
+        min_dist: float | None = None,
+        max_dist: float | None = None,
+        tx_association: bool = True,
+        seed: int = 1
         ) -> Tuple[mi.TensorXu]:
         # pylint: disable=line-too-long
         r"""Samples random cells in a radio map
@@ -404,9 +411,9 @@ class RadioMap(ABC):
 
     def cdf(
         self,
-        metric : str = "path_gain",
-        tx : int | None = None,
-        bins : int = 200
+        metric: str = "path_gain",
+        tx: int | None = None,
+        bins: int = 200
         ) -> Tuple[plt.Figure, mi.TensorXf, mi.Float]:
         r"""Computes and visualizes the CDF of a metric of the radio map
 
@@ -489,8 +496,8 @@ class RadioMap(ABC):
 
     def transmitter_radio_map(
         self,
-        metric : str = "path_gain",
-        tx : int | None = None
+        metric: str = "path_gain",
+        tx: int | None = None
         ) -> mi.TensorXf:
         r"""Returns the radio map values corresponding to transmitter ``tx``
         and a specific ``metric``
@@ -513,9 +520,107 @@ class RadioMap(ABC):
                 raise ValueError(msg)
             elif (tx >= self.num_tx) or (tx < 0):
                 raise ValueError(f"Invalid transmitter index {tx}, expected "
-                                 f"index in range [0, {self.num_tx}).")
+                               f"index in range [0, {self.num_tx}).")
             tensor = tensor[tx]
         else:
             tensor = dr.max(tensor, axis=0)
 
         return tensor
+
+    def _diffraction_integration_weight(
+        self,
+        wedges: WedgeGeometry,
+        source: mi.Point3f,
+        q: mi.Point3f,
+        k_world: mi.Vector3f,
+        si: mi.SurfaceInteraction3f
+    ) -> mi.Float:
+        # pylint: disable=line-too-long
+        r"""Computes the diffraction integration weight required for computing
+        the radio map contribution from diffracted rays
+
+        This weight is used to integrate the observed electric field over the
+        cell surface by performing a change of variables from the cell surface
+        coordinates to the position of the diffraction point on the edge and the
+        angle of the diffracted ray on the Keller cone. This transformation
+        enables efficient surface integration for diffracted field contributions.
+
+        :param wedges: Wedge geometry information containing edge and surface
+            properties
+        :param source: Position of the source point from which the ray originates
+        :param q: Position of the observation point on the measurement surface
+        :param k_world: Direction of propagation of the diffracted ray in world
+            coordinates
+        :param si: Surface interaction information at the measurement point
+
+        :return: Weight for the surface integral transformation
+        """
+
+        # The edge local basis is defined as (t0, n0, e_hat)
+        n0 = wedges.n0
+        e_hat = wedges.e_hat
+        t0 = dr.normalize(dr.cross(n0, e_hat))
+        # Wedge origin
+        wedge_o = wedges.o
+
+        # Change-of-basis matrix from the local edge basis to the world basis
+        rot_edge2world = mi.Matrix3f(
+            t0.x, n0.x, e_hat.x,
+            t0.y, n0.y, e_hat.y,
+            t0.z, n0.z, e_hat.z
+        )
+
+        # Angle of the diffracted ray on the Keller cone
+        k_local = rot_edge2world.T @ k_world
+        _, phi = theta_phi_from_unit_vec(k_local)
+        # Enable gradient tracking for phi
+        dr.enable_grad(phi)
+
+        # Position of the diffraction point on the edge
+        ell = dr.norm(q - wedge_o)
+        dr.enable_grad(ell)
+
+        def _compute_s(source, ell, phi, si):
+
+            # Project the source on the edge and computes
+            w = dr.dot(source - wedge_o, e_hat)
+            source_proj = wedge_o + w * e_hat
+
+            # Compute sin(theta) and cos(theta), where theta is the Keller cone angle
+            # To get the gradients with respect to `ell` and `phi`
+            # (angle of diffracted ray on the Keller cone),
+            # we need to express these sine and cosin as a function of these two parameters.
+            v = source - wedge_o
+            nrm = dr.norm(ell*e_hat - v)
+            sin_theta = dr.norm(source - source_proj)*dr.rcp(nrm)
+            cos_theta = (ell - w)*dr.rcp(nrm)
+
+            # Direction of departure of diffracted ray in the local edge basis
+            d_local = mi.Vector3f(
+                sin_theta*dr.cos(phi),
+                sin_theta*dr.sin(phi),
+                cos_theta
+            )
+            # Direction of departure of diffracted ray in the world basis
+            d_world = rot_edge2world @ d_local
+
+            # Positon of the intersection point
+            u = si.p - wedge_o
+            s = (wedge_o + ell * e_hat +
+                 dr.dot(si.n, u - ell*e_hat)*dr.rcp(dr.dot(si.n, d_world))*d_world)
+            return s
+
+        with dr.suspend_grad(phi):
+            s_wrt_ell = _compute_s(source, ell, phi, si)
+        with dr.suspend_grad(ell):
+            s_wrt_phi = _compute_s(source, ell, phi, si)
+
+        dr.set_grad(ell, 1.0)
+        dr.set_grad(phi, 1.0)
+        dr.enqueue(dr.ADMode.Forward, ell)
+        dr.enqueue(dr.ADMode.Forward, phi)
+        dr.traverse(dr.ADMode.Forward)
+
+        j_ell = s_wrt_ell.grad
+        j_phi = s_wrt_phi.grad
+        return dr.norm(dr.cross(j_phi, j_ell))

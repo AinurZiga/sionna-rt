@@ -10,6 +10,7 @@ from typing import List, Tuple
 
 from sionna.rt.scene import Scene
 from .radio_map import RadioMap
+from sionna.rt.utils import WedgeGeometry, wedge_interior_angle
 
 class MeshRadioMap(RadioMap):
     r"""
@@ -25,7 +26,7 @@ class MeshRadioMap(RadioMap):
     :param meas_surface: Mesh to be used as the measurement surface
     """
 
-    def __init__(self, scene : Scene, meas_surface : mi.Mesh):
+    def __init__(self, scene: Scene, meas_surface: mi.Mesh):
 
         super().__init__(scene)
 
@@ -74,41 +75,55 @@ class MeshRadioMap(RadioMap):
 
     @property
     def path_gain(self):
-        r"""Path gains across the radio map from all transmitters
+        # pylint: disable=line-too-long
+        r"""Path gains across the radio map from all transmitters [unitless, linear scale]
 
         :type: :py:class:`mi.TensorXf [num_tx, num_primitives]`
         """
         return self._pathgain_map
 
-    def add(
+    def add_paths(
         self,
-        e_fields : mi.Vector4f,
-        solid_angle : mi.Float,
-        array_w : List[mi.Float],
-        si_mp : mi.SurfaceInteraction3f,
-        k_world : mi.Vector3f,
-        tx_indices : mi.UInt,
-        hit : mi.Bool
-    ) -> None:
+        e_fields: mi.Vector4f,
+        array_w: List[mi.Float],
+        si: mi.SurfaceInteraction3f,
+        k_world: mi.Vector3f,
+        tx_indices: mi.UInt,
+        active: mi.Bool,
+        diffracted_paths: bool,
+        solid_angle: mi.Float | None = None,
+        tx_positions: mi.Point3f | None = None,
+        wedges: WedgeGeometry | None = None,
+        diff_point: mi.Point3f | None = None,
+        wedges_samples_cnt: mi.UInt | None = None):
+        # pylint: disable=line-too-long
         r"""
-        Adds the contribution of the rays that hit the measurement plane to the
-        radio maps
+        Adds the contribution of the paths that hit the measurement surface
+        to the radio maps
 
         The radio maps are updated in place.
 
         :param e_fields: Electric fields as real-valued vectors of dimension 4
-        :param solid_angle: Ray tubes solid angles [sr]
         :param array_w: Weighting used to model the effect of the transmitter
             array
-        :param si_mp: Informations about the interaction with the measurement
-            plane
-        :param k_world: Directions of propagation of the rays
-        :param tx_indices: Indices of the transmitters from which the rays
-            originate
-        :param hit: Flags indicating if the rays hit the measurement plane
+        :param si: Informations about the interaction with the measurement
+            surface
+        :param k_world: Directions of propagation of the incident paths
+        :param tx_indices: Indices of the transmitters from which the rays originate
+        :param active: Flags indicating if the paths should be added to the radio map
+        :param diffracted_paths: Flags indicating if the paths are diffracted
+        :param solid_angle: Ray tubes solid angles [sr] for non-diffracted paths.
+            Not required for diffracted paths.
+        :param tx_positions: Positions of the transmitters
+        :param wedges: Properties of the intersected wedges.
+            Not required for non-diffracted paths.
+        :param diff_point: Position of the diffraction point on the wedge.
+            Not required for non-diffracted paths.
+        :param wedges_samples_cnt: Number of samples on the wedge.
+            Not required for non-diffracted paths.
         """
         # Indices of the hit cells is the primitive ID
-        tensor_ind = tx_indices * self.cells_count + si_mp.prim_index
+        tensor_ind = tx_indices * self.cells_count + si.prim_index
 
         # Contribution to the path loss map
         a = dr.zeros(mi.Vector4f, 1)
@@ -116,15 +131,27 @@ class MeshRadioMap(RadioMap):
             a += aw @ e_field
         a = dr.squared_norm(a)
 
-        # Ray weight
-        cos_theta = dr.abs(dr.dot(si_mp.n, k_world))
-        w = solid_angle * dr.rcp(cos_theta)
+        # Ray weight for non-diffracted paths
+        if not diffracted_paths:
+            cos_theta = dr.abs(dr.dot(si.n, k_world))
+            w = solid_angle * dr.rcp(cos_theta)
+        else:
+            # Ray weight for diffracted paths
+            tx_positions_ = dr.gather(mi.Point3f, tx_positions, tx_indices,
+                                     active=active)
+            w = self._diffraction_integration_weight(wedges, tx_positions_,
+                                                     diff_point, k_world, si)
+            # Multiply by edge length and exterior angle
+            w *= wedges.length * (dr.two_pi -
+                                 wedge_interior_angle(wedges.n0, wedges.nn))
+            # Divide by the number of samples on this edge
+            w /= wedges_samples_cnt
 
         # Normalize by cell area
         # First, compute the primitive area
         # Primitive vertices
         meas_surface = self.measurement_surface
-        prim_index = meas_surface.face_indices(si_mp.prim_index, active=hit)
+        prim_index = meas_surface.face_indices(si.prim_index, active=active)
         v0 = meas_surface.vertex_position(prim_index[0])
         v1 = meas_surface.vertex_position(prim_index[1])
         v2 = meas_surface.vertex_position(prim_index[2])
@@ -135,16 +162,17 @@ class MeshRadioMap(RadioMap):
         v2_sq_norm = dr.squared_norm(v2)
         cell_area = 0.5 * dr.sqrt(v1_sq_norm * v2_sq_norm
                                   - dr.square(dr.dot(v1, v2)))
-        # Apply normalization
+        # Apply normalization by cell area
         w *= dr.rcp(cell_area)
 
+        # Apply ray weight
         a *= w
 
         # Update the path loss map
         dr.scatter_reduce(dr.ReduceOp.Add, self._pathgain_map.array, value=a,
-                          index=tensor_ind, active=hit)
+                          index=tensor_ind, active=active)
 
-    def finalize(self) -> None:
+    def finalize(self):
         """Finalizes the computation of the radio map."""
 
         # Scale the pathloss map
@@ -154,15 +182,15 @@ class MeshRadioMap(RadioMap):
 
     def sample_positions(
         self,
-        num_pos : int,
-        metric : str = "path_gain",
-        min_val_db : float | None = None,
-        max_val_db : float | None = None,
-        min_dist : float | None = None,
-        max_dist : float | None = None,
-        tx_association : bool = True,
-        center_pos : bool = False,
-        seed : int = 1
+        num_pos: int,
+        metric: str = "path_gain",
+        min_val_db: float | None = None,
+        max_val_db: float | None = None,
+        min_dist: float | None = None,
+        max_dist: float | None = None,
+        tx_association: bool = True,
+        center_pos: bool = False,
+        seed: int = 1
         ) -> Tuple[mi.TensorXf, mi.TensorXu]:
         # pylint: disable=line-too-long
         r"""Samples random user positions in a scene based on a radio map
@@ -280,7 +308,7 @@ class MeshRadioMap(RadioMap):
             positions are randomly drawn from the surface of the cell.
 
         :return: Random positions :math:`(x,y,z)` [m]
-            (shape : :py:class:`[num_tx, num_pos, 3]`) that are in cells
+            (shape: :py:class:`[num_tx, num_pos, 3]`) that are in cells
             fulfilling the configured constraints
 
         :return: Cell indices (shape :py:class:`[num_tx, num_pos]`)

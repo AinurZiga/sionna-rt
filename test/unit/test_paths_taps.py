@@ -25,12 +25,13 @@ def test_taps_computation(synthetic_array, normalize_delays, normalize):
     scene.tx_array = PlanarArray(num_cols=3, num_rows=3,
                             pattern="iso", polarization="V")
     scene.rx_array = PlanarArray(num_cols=1, num_rows=2,
-                            pattern="iso", polarization="VH")
+                            pattern="iso", polarization="V")
     scene.get("tx-1").velocity = [-10, 10, 10]
     scene.get("rx-2").velocity = [-5, 8, 6]
     p_solver = PathSolver()
     paths = p_solver(scene, los=True, specular_reflection=True,
                 diffuse_reflection=False, refraction=False,
+                diffraction=True, edge_diffraction=True,
                 synthetic_array=synthetic_array)
 
     sampling_frequency = 10**5

@@ -42,6 +42,33 @@ def load_box_one_screen_scene(material_name, thickness, scattering_coefficient):
 
     return scene
 
+def load_box_knife_scene(material_name, thickness, scattering_coefficient):
+
+    # scene = load_scene(rt.scene.box_knife, merge_shapes=False)
+    scene = load_scene(rt.scene.box_knife, merge_shapes=False)
+    screen = scene.get("box")
+
+    screen.radio_material = ITURadioMaterial(
+                                name=f"mat-{material_name}",
+                                itu_type=material_name,
+                                thickness=thickness,
+                                scattering_coefficient=scattering_coefficient)
+
+    return scene
+
+def load_box_box_two_screens_scene(material_name, thickness, scattering_coefficient):
+
+    scene = load_scene(rt.scene.box_two_screens, merge_shapes=False)
+    screen = scene.get("box")
+
+    screen.radio_material = ITURadioMaterial(
+                                name=f"mat-{material_name}",
+                                itu_type=material_name,
+                                thickness=thickness,
+                                scattering_coefficient=scattering_coefficient)
+
+    return scene
+
 ############################################################
 # Unit tests
 ############################################################
@@ -56,21 +83,22 @@ def test_specular_reflection_transmission_depth_1(int_type_str):
 
     Input
     ------
-    type : str, 'specular' or 'transmission'
+    type: str, 'specular' or 'transmission'
         'specular': Test with only specular reflection
         'transmission': Test with only transmission
-
     """
-
     assert int_type_str in ('specular', 'transmission'), "Wrong interaction type"
 
 
     if int_type_str == 'specular':
         thickness = 1.0 # Only reflection as using metal as material
         int_type = InteractionType.SPECULAR
+        expected_count = 6 # 1 per plane
     elif int_type_str == 'transmission':
         thickness = 0.0 # Only transmission
         int_type = InteractionType.REFRACTION
+        expected_count = 1 # Only a single one suffices,
+                           # through which primitive is not important
 
     source = mi.Point3f(0., 0., 1.5)
     target = mi.Point3f(1., 1., 1.)
@@ -84,7 +112,7 @@ def test_specular_reflection_transmission_depth_1(int_type_str):
 
     paths = tracer(scene.mi_scene, source, target, samples_per_src, max_num_paths, max_depth,
                    los=True, refraction=True, specular_reflection=True,
-                   diffuse_reflection=True, seed=1)
+                   diffuse_reflection=True, diffraction=False, edge_diffraction=False, seed=1)
     paths.shrink()
 
     shapes = paths.shapes.numpy()[:,0]
@@ -93,7 +121,7 @@ def test_specular_reflection_transmission_depth_1(int_type_str):
     valid = paths.valid.numpy()
 
     # Depth should be set to 1 and max_num_path to 13
-    assert paths.buffer_size == 13
+    assert paths.buffer_size == expected_count + 1
     assert paths.max_depth == 1
 
     # There should be one LoS, and all other interactions must be of the
@@ -103,7 +131,7 @@ def test_specular_reflection_transmission_depth_1(int_type_str):
     assert InteractionType.NONE in int_types_u
     assert int_type in int_types_u
     assert 1 in int_types_c
-    assert 12 in int_types_c
+    assert expected_count in int_types_c
 
     # Index of the LoS
     if int_types_c[0] == 1:
@@ -115,9 +143,9 @@ def test_specular_reflection_transmission_depth_1(int_type_str):
     assert shapes[los_index] == INVALID_SHAPE
     assert np.unique(shapes).shape[0] == 2
 
-    # 12 unique primitives should be found
+    # Each interaction should hit a unique primitive
     assert primitives[los_index] == INVALID_PRIMITIVE
-    assert np.unique(primitives).shape[0] == 13
+    assert np.unique(primitives).shape[0] == expected_count + 1
 
     # No paths should be valid, i.e., only candidates
     assert valid[los_index]
@@ -134,7 +162,7 @@ def test_specular_or_transmission_depth_1_multilink(int_type_str):
 
     Input
     ------
-    type : str, 'specular' or 'transmission'
+    type: str, 'specular' or 'transmission'
         'specular': Test with only specular reflection
         'transmission': Test with only transmission
     """
@@ -144,9 +172,12 @@ def test_specular_or_transmission_depth_1_multilink(int_type_str):
     if int_type_str == 'specular':
         thickness = 1.0 # Only reflection as using metal as material
         int_type = InteractionType.SPECULAR
+        expected_count = 6 # 1 per plane
     elif int_type_str == 'transmission':
         thickness = 0.0 # Only transmission
         int_type = InteractionType.REFRACTION
+        expected_count = 1 # Only a single one suffices,
+                            # through which primitive is not important
 
     # 2 sources
     sources = mi.Point3f([-3., -3],
@@ -168,7 +199,7 @@ def test_specular_or_transmission_depth_1_multilink(int_type_str):
 
     paths = tracer(scene.mi_scene, sources, targets, samples_per_src, max_num_paths, max_depth,
                    los=True, refraction=True, specular_reflection=True,
-                   diffuse_reflection=True, seed=1)
+                   diffuse_reflection=True, diffraction=False, edge_diffraction=False, seed=1)
     paths.shrink()
 
     shapes = paths.shapes.numpy()[:,0]
@@ -181,7 +212,7 @@ def test_specular_or_transmission_depth_1_multilink(int_type_str):
     # Depth should be set to 1 and max_num_path to 12*6, as they are 12
     # primitives in the scene.mi_scene, and each of the 6 link should have the 12
     # primitives as candidates
-    assert paths.buffer_size == 13*6 # 13 per link
+    assert paths.buffer_size == (expected_count+1)*6
     assert paths.max_depth == 1
 
     # Extract LoS and check it
@@ -216,7 +247,7 @@ def test_specular_or_transmission_depth_1_multilink(int_type_str):
     # Only one shape
     assert np.unique(shapes).shape[0] == 1
 
-    # 12 unique primitives should be found for each (source, target) link
+    # Primitives each (source, target) link and each candidate should be unique
     primitives_per_link = {}
     for src_ind, tgt_ind, prim_ind in zip(src_indices, tgt_indices, primitives):
         key = (src_ind, tgt_ind)
@@ -229,8 +260,8 @@ def test_specular_or_transmission_depth_1_multilink(int_type_str):
     for src_ind in range(2):
         for tgt_ind in range(3):
             key = (src_ind, tgt_ind)
-            # There should be 6 unique primitives for each link
-            assert np.unique(primitives_per_link[key]).shape[0] == 12
+            # Check that the number of primitives per link is correct
+            assert np.unique(primitives_per_link[key]).shape[0] == expected_count
 
     # No paths should be valid, i.e., only candidates
     assert np.all(np.logical_not(valid))
@@ -256,7 +287,7 @@ def test_specular_and_transmission_depth_1():
 
     paths = tracer(scene.mi_scene, source, target, samples_per_src, max_num_paths, max_depth,
                    los=True, refraction=True, specular_reflection=True,
-                   diffuse_reflection=True, seed=1)
+                   diffuse_reflection=True, diffraction=False, edge_diffraction=False, seed=1)
     paths.shrink()
 
     shapes = paths.shapes.numpy()[:,0]
@@ -264,10 +295,11 @@ def test_specular_and_transmission_depth_1():
     int_types = paths.interaction_types.numpy()[:,0]
     valid = paths.valid.numpy()
 
-    # Depth should be set to 1 and max_num_path to 24
-    # Indeed, each primitive should have one transmitted path and
-    # one specularly reflected path
-    assert paths.buffer_size == 25
+    # Depth should be set to 1 and max_num_path to 8:
+    # - 1 LoS
+    # - 1 transmitted path (doesn't matter through which primitive)
+    # - 6 specular reflections (1 per plane)
+    assert paths.buffer_size == 8
     assert paths.max_depth == 1
 
     # Extract LoS and check it
@@ -294,6 +326,14 @@ def test_specular_and_transmission_depth_1():
     for int_type in int_types:
         assert int_type in (InteractionType.SPECULAR, InteractionType.REFRACTION)
 
+    # There should be one specular reflection per plane
+    spec_indices = np.where(int_types == InteractionType.SPECULAR)[0]
+    assert spec_indices.shape[0] == 6
+
+    # There should be a single transmission path
+    tr_indices = np.where(int_types == InteractionType.REFRACTION)[0]
+    assert tr_indices.shape[0] == 1
+
     # Only one shape
     assert np.unique(shapes).shape[0] == 1
 
@@ -303,7 +343,7 @@ def test_specular_and_transmission_depth_1():
     # Check that there is no redundancy
     inter_pair = np.stack([primitives, int_types], axis=1)
     inter_pair = np.unique(inter_pair, axis=0)
-    assert inter_pair.shape[0] == 24
+    assert inter_pair.shape[0] == 7
 
 def test_specular_and_transmission_depth_1_multilink():
     """
@@ -334,7 +374,7 @@ def test_specular_and_transmission_depth_1_multilink():
 
     paths = tracer(scene.mi_scene, sources, targets, samples_per_src, max_num_paths, max_depth,
                    los=True, refraction=True, specular_reflection=True,
-                   diffuse_reflection=True, seed=1)
+                   diffuse_reflection=True, diffraction=False, edge_diffraction=False, seed=1)
     paths.shrink()
 
     shapes = paths.shapes.numpy()[:,0]
@@ -344,10 +384,11 @@ def test_specular_and_transmission_depth_1_multilink():
     src_indices = paths.source_indices.numpy()
     tgt_indices = paths.target_indices.numpy()
 
-    # Depth should be set to 1 and max_num_path to 25*6
-    # Indeed, each link should have one transmitted path and
-    # one specularly reflected path for each primitive
-    assert paths.buffer_size == 25*6
+    # Depth should be set to 1 and max_num_path to 8*6
+    # Indeed, each link should have a single LoS, a single
+    # transmitted path as well as one specularly reflected
+    # path per plane.
+    assert paths.buffer_size == 8*6
     assert paths.max_depth == 1
 
     # Extract LoS and check it
@@ -380,6 +421,14 @@ def test_specular_and_transmission_depth_1_multilink():
     for int_type in int_types:
         assert int_type in (InteractionType.SPECULAR, InteractionType.REFRACTION)
 
+    # There should be one specular reflection per plane per link
+    spec_indices = np.where(int_types == InteractionType.SPECULAR)[0]
+    assert spec_indices.shape[0] == 6*6
+
+    # There should be a single transmission path
+    tr_indices = np.where(int_types == InteractionType.REFRACTION)[0]
+    assert tr_indices.shape[0] == 6
+
     # Only one shape
     assert np.unique(shapes).shape[0] == 1
 
@@ -389,7 +438,7 @@ def test_specular_and_transmission_depth_1_multilink():
     # Check that there is no redundancy
     inter_pair = np.stack([src_indices, tgt_indices, primitives, int_types], axis=1)
     inter_pair = np.unique(inter_pair, axis=0)
-    assert inter_pair.shape[0] == 24*6
+    assert inter_pair.shape[0] == 7*6
 
 def test_los_with_obstruction_multilink():
     r"""
@@ -420,7 +469,7 @@ def test_los_with_obstruction_multilink():
 
     paths = tracer(scene.mi_scene, sources, targets, samples_per_src, max_num_paths, max_depth,
                    los=True, refraction=True, specular_reflection=True,
-                   diffuse_reflection=True, seed=1)
+                   diffuse_reflection=True, diffraction=True, edge_diffraction=True, seed=1)
     paths.shrink()
 
     shapes = paths.shapes.numpy()
@@ -451,21 +500,27 @@ def test_los_with_obstruction_multilink():
     assert los_src_indices[0] == 0 and los_tgt_indices[0] == 0
     assert los_src_indices[1] == 1 and los_tgt_indices[1] == 2
 
-def test_transmission_specular_high_depth():
+@pytest.mark.parametrize("scene_name", [
+    "box_knife",
+    "box_one_screen",
+])
+def test_specular_chains_high_depth(scene_name):
     r"""
-    Test chains that consists of specular and transmission only and of high
-    depth
+    Test specular chains of high depth
+    - No duplicates
+    - No paths continuing after a None interaction
+    - At most a single diffraction per path
     """
 
     # 2 sources
     sources = mi.Point3f([-3., -3],
-                         [1., -1.],
-                         [2.5, 2.5])
+                            [1., -1.],
+                            [2.5, 2.5])
 
     # 3 targets
     targets = mi.Point3f([3., 3., 3.],
-                         [1., 0., -1.],
-                         [2.5, 1.5, 2.5])
+                            [1., 0., -1.],
+                            [2.5, 1.5, 2.5])
     # 2x3 = 6 links
 
     max_depth = 10
@@ -475,17 +530,21 @@ def test_transmission_specular_high_depth():
     # Set material of the screen to glass with a thickness of 1cm, which lead to
     # almost equal splitting of the energy between transmission and reflection
     # Scattering coefficient for the screen set to 0
-    scene = load_box_one_screen_scene("glass", 0.01, 0.0)
+    if scene_name == "box_knife":
+        scene = load_box_knife_scene("glass", 0.01, 0.0)
+    else:
+        scene = load_box_one_screen_scene("glass", 0.01, 0.0)
 
     tracer = SBCandidateGenerator()
 
     paths = tracer(scene.mi_scene, sources, targets, samples_per_src, max_num_paths, max_depth,
-                   los=False, refraction=True, specular_reflection=True,
-                   diffuse_reflection=True, seed=1)
+                    los=False, refraction=True, specular_reflection=True,
+                    diffuse_reflection=True, diffraction=True, edge_diffraction=True, seed=1)
     paths.shrink()
 
     shapes = paths.shapes.numpy()
     primitives = paths.primitives.numpy()
+    local_edges = paths.diffracting_wedges.local_edge.numpy()
     int_types = paths.interaction_types.numpy()
     valid = paths.valid.numpy()
     src_indices = paths.source_indices.numpy()
@@ -501,17 +560,23 @@ def test_transmission_specular_high_depth():
         inters = int_types[:,d]
         specular = np.equal(inters, InteractionType.SPECULAR)
         transmission = np.equal(inters, InteractionType.REFRACTION)
+        diffraction = np.equal(inters, InteractionType.DIFFRACTION)
         no_int = np.equal(inters, InteractionType.NONE)
 
-        # Interaction type is specular or none
-        assert np.all(np.any([specular, transmission, no_int]))
+        # Interaction type is valid
+        assert np.all(np.any([specular, transmission, diffraction, no_int], axis=0))
 
         # If paths is done, there should be only none interaction
         assert np.all(np.logical_or(paths_active, no_int))
 
         # Update paths state
-        paths_active = np.logical_and(paths_active, np.logical_or(specular,
-                                                                  transmission))
+        paths_active = np.logical_and(paths_active, np.any([specular,
+                                                            transmission,
+                                                            diffraction], axis=0))
+
+    # Check that there is at most one diffraction
+    num_diffraction = np.sum(int_types == InteractionType.DIFFRACTION, axis=1)
+    assert np.all(num_diffraction <= 1)
 
     # No paths should be valid, i.e., only candidates
     assert np.all(np.logical_not(valid))
@@ -520,11 +585,15 @@ def test_transmission_specular_high_depth():
     # First, aggregate all interaction for each link
     link_interactions = {}
     i = 1
-    for src_ind, tgt_ind, shape_ind, prim_ind, int_type in zip(src_indices, tgt_indices, shapes, primitives, int_types):
+    for src_ind, tgt_ind, shape_ind, prim_ind, local_edge, int_type\
+        in zip(src_indices, tgt_indices, shapes, primitives, local_edges, int_types):
         key = (src_ind, tgt_ind)
         if key not in link_interactions:
             link_interactions[key] = []
-        inter = np.stack([shape_ind, prim_ind, int_type], axis=1)
+        # As diffraction is only supported for first order, we
+        # duplicate the local edge for each depth
+        local_edge = np.full(max_depth, local_edge)
+        inter = np.stack([shape_ind, prim_ind, local_edge, int_type], axis=1)
         i += 1
         link_interactions[key].append(inter)
     # Check each link
@@ -537,109 +606,13 @@ def test_transmission_specular_high_depth():
             _, counts = np.unique(inter, axis=0, return_counts=True)
             assert np.all(np.equal(counts, 1))
 
-def test_specular_depth_high():
-    """
-    Test specular chains of high depth
-    """
-
-    # 2 sources
-    sources = mi.Point3f([-3., -3],
-                         [1., -1.],
-                         [2.5, 2.5])
-
-    # 3 targets
-    targets = mi.Point3f([3., 0., 3.],
-                         [1., 0., -1.],
-                         [2.5, 1.5, 2.5])
-    # 2x3 = 6 links
-
-    max_depth = 10
-    samples_per_src = int(1e5)
-    max_num_paths = int(1e7)
-
-    # Set material to metal which leads to all the energy being reflected
-    # Scattering coefficient set to 0
-    scene = load_box_scene("metal", 0.01, scattering_coefficient=0.)
-
-    tracer = SBCandidateGenerator()
-
-    paths = tracer(scene.mi_scene, sources, targets, samples_per_src, max_num_paths, max_depth,
-                   los=False, refraction=True, specular_reflection=True,
-                   diffuse_reflection=True, seed=1)
-    paths.shrink()
-
-    primitives = paths.primitives.numpy()
-    int_types = paths.interaction_types.numpy()
-    valid = paths.valid.numpy()
-    src_indices = paths.source_indices.numpy()
-    tgt_indices = paths.target_indices.numpy()
-
-    # Depth should be set to `max_depth`
-    assert paths.max_depth == max_depth
-
-    # Check interaction types
-    num_paths = paths.buffer_size
-    paths_active = np.full([num_paths], True)
-    for d in range(max_depth):
-        inters = int_types[:,d]
-        specular = np.equal(inters, InteractionType.SPECULAR)
-        no_int = np.equal(inters, InteractionType.NONE)
-
-        # Interaction type is specular or none
-        assert np.all(np.logical_or(specular, no_int))
-
-        # If paths is done, there should be only none interaction
-        assert np.all(np.logical_or(paths_active, no_int))
-
-        # Update paths state
-        paths_active = np.logical_and(paths_active, specular)
-
-    # No paths should be valid, i.e., only candidates
-    assert np.all(np.logical_not(valid))
-
-    # Check there are no duplicate candidates
-    # First, aggregate all interaction for each link
-    primitives_seq = {}
-    int_types_seq = {}
-    i = 1
-    for src_ind, tgt_ind, prim_ind, int_type in zip(src_indices, tgt_indices, primitives, int_types):
-        key = (src_ind, tgt_ind)
-        if key not in primitives_seq:
-            primitives_seq[key] = []
-            int_types_seq[key] = []
-        i += 1
-        primitives_seq[key].append(prim_ind)
-        int_types_seq[key].append(int_type)
-    # Check each link
-    for src_ind in range(2):
-        for tgt_ind in range(3):
-            key = (src_ind, tgt_ind)
-
-            prim_ind = primitives_seq[key]
-            prim_ind = np.stack(prim_ind, axis=0)
-            _, counts = np.unique(prim_ind, axis=0, return_counts=True)
-            assert np.all(np.equal(counts, 1))
-
-            # Check paths with depth 1
-            int_type = int_types_seq[key]
-            int_type = np.stack(int_type, axis=0)
-            depth_1_paths_indices = np.where(int_type[:,1] == InteractionType.NONE)[0]
-            depth_1_paths_prims = prim_ind[depth_1_paths_indices,0]
-            # Should be 12 paths
-            # Disabled as due to scheduling of threads, all first-order
-            # specular paths might not be found when the path buffer is not
-            # large enough in such scenarios.
-            # assert depth_1_paths_prims.shape[0] == 12
-            #
-            _, prims_counts = np.unique(depth_1_paths_prims, return_counts=True)
-            assert np.all(np.equal(prims_counts, 1))
-
 def test_specular_prefixes():
     """
-    Test that, for specular chains, all prefixes are listed as candidates
+    Thest that, for specular chains, all possible candidates are generated with
+    diffraction disabled.
     """
     # 2 sources
-    sources = mi.Point3f([-3., -3],
+    sources = mi.Point3f([-3., -3.5],
                          [1., -1.],
                          [2.5, 2.5])
 
@@ -650,7 +623,7 @@ def test_specular_prefixes():
     # 2x3 = 6 links
 
     max_depth = 3
-    samples_per_src = 100
+    samples_per_src = 10000
     max_num_paths = int(1e5)
 
     # Set material to metal which leads to all the energy being reflected
@@ -659,57 +632,116 @@ def test_specular_prefixes():
     tracer = SBCandidateGenerator()
 
     paths = tracer(scene.mi_scene, sources, targets, samples_per_src, max_num_paths, max_depth,
-                   los=False, refraction=True, specular_reflection=True,
-                   diffuse_reflection=True, seed=1)
+                    los=False, refraction=True, specular_reflection=True,
+                    diffuse_reflection=False, diffraction=False, edge_diffraction=False, seed=1)
+    paths.shrink()
+    # In this scene, for each link, there should be 150 individual candidates:
+    # - 6 depth-1 candidates, one for each face
+    # - 30 depth-2 candidates, as each depth-1 candidate can hit any of the other 5 faces
+    # - 114 depth-3 candidates. The maximum number of such candidates is 126:
+    #   - 6x4x4 for paths that hit adjacent faces in the first two interactions
+    #   - 6x1x5 for paths that hit parallel faces in the first two interactions
+    #   - In this configuration however, 12 paths are inadmissible because of the
+    #     origin of the path, which leads to 114 candidates.
+    assert paths.buffer_size == 6 * 150
+
+def test_diffraction_knife():
+    """
+    Test diffraction in the knife scene (wedge diffraction) with max_depth = 1.
+    Ensure that all candidates are found in this simple setup.
+    """
+
+    sources = mi.Point3f([-3.],
+                        [-2.],
+                        [3.])
+
+    targets = mi.Point3f([-2, 3],
+                        [2., 2],
+                        [3., 4])
+
+    max_depth = 1
+    samples_per_src = 10000
+    max_num_paths = int(1e5)
+
+    # Set material to metal which leads to all the energy being reflected
+    # Scattering coefficient set to 0
+    scene = load_box_knife_scene("metal", 0.01, scattering_coefficient=0.)
+    tracer = SBCandidateGenerator()
+
+    paths = tracer(scene.mi_scene, sources, targets, samples_per_src, max_num_paths, max_depth,
+                    los=False, refraction=True, specular_reflection=True,
+                    diffuse_reflection=False, diffraction=True, edge_diffraction=False, seed=1)
     paths.shrink()
 
-    primitives = paths.primitives.numpy()
-    max_depth = paths.max_depth
+    int_types = paths.interaction_types.numpy().flatten()
     src_indices = paths.source_indices.numpy()
     tgt_indices = paths.target_indices.numpy()
 
-    # Test that all prefixes are listed as candidates
-    # First, aggregate all interaction for each link
-    link_interactions = {}
-    for src_ind, tgt_ind, prim_ind in zip(src_indices, tgt_indices, primitives):
-        key = (src_ind, tgt_ind)
-        if key not in link_interactions:
-            link_interactions[key] = []
-        link_interactions[key].append(prim_ind)
-    # Check the prefixes for every link
-    for src_ind in range(2):
-        for tgt_ind in range(3):
-            key = (src_ind, tgt_ind)
-            prim_ind = link_interactions[key]
-            prim_ind = np.stack(prim_ind, axis=0)
+    # Count number of diffraction per link
+    num_diffractions = {}
 
-            num_paths = prim_ind.shape[0]
-            for i in range(num_paths):
-                # Extract the sequence of primitives forming this path
-                path = prim_ind[i]
+    for s, t, i in zip(src_indices, tgt_indices, int_types):
+        k = (s,t)
+        if k not in num_diffractions:
+            num_diffractions[k] = 0
+        if i == InteractionType.DIFFRACTION:
+            num_diffractions[k] += 1
 
-                # Compute the path depth
-                for d in range(max_depth):
-                    if path[d] == INVALID_PRIMITIVE:
-                        break
-                # Nothing to check if depth is 1
-                if d == 1:
-                    continue
+    # Number of diffraction per link should be 2
+    # This is because the knife is made of two separate segments
 
-                # Remove last interaction to get a prefix
-                prefix = path[:d-1]
-                prefix = np.pad(prefix, [[0,max_depth-d+1]],
-                                constant_values=INVALID_PRIMITIVE)
+    all_num_diffractions = np.array(list(num_diffractions.values()))
+    assert np.all(all_num_diffractions == 2)
 
-                # Check that the prefix is part of the found paths
-                found = False
-                for j in range(num_paths):
-                    path_2 = prim_ind[j]
-                    eq = np.sum(np.abs(path_2-prefix))
-                    found = np.equal(eq, 0.)
-                    if found:
-                        break
-                assert found
+def test_diffraction_one_screen():
+    """
+    Test diffraction in the one screen scene (edge diffraction) with max_depth = 1.
+    Ensure that all candidates are found in this simple setup.
+    """
+
+    sources = mi.Point3f([-2., -3.],
+                        [-2., 3.],
+                        [3., 2.])
+    num_sources = sources.shape[1]
+
+    targets = mi.Point3f([2, 3],
+                        [3., -1],
+                        [3., 4])
+    num_targets = targets.shape[1]
+
+    max_depth = 1
+    samples_per_src = 10000
+    max_num_paths = int(1e5)
+
+    # Set material to metal which leads to all the energy being reflected
+    # Scattering coefficient set to 0
+    scene = load_box_one_screen_scene("metal", 0.01, scattering_coefficient=0.)
+    tracer = SBCandidateGenerator()
+
+    paths = tracer(scene.mi_scene, sources, targets, samples_per_src, max_num_paths, max_depth,
+                    los=False, refraction=True, specular_reflection=True,
+                    diffuse_reflection=False, diffraction=True, edge_diffraction=True, seed=1)
+    paths.shrink()
+
+    int_types = paths.interaction_types.numpy().flatten()
+    src_indices = paths.source_indices.numpy()
+    tgt_indices = paths.target_indices.numpy()
+
+    # Count number of diffraction per link
+    num_diffractions = {}
+
+    for s, t, i in zip(src_indices, tgt_indices, int_types):
+        k = (s,t)
+        if k not in num_diffractions:
+            num_diffractions[k] = 0
+        if i == InteractionType.DIFFRACTION:
+            num_diffractions[k] += 1
+
+    # Number of diffraction per link should be 2
+    # This is because the knife is made of two separate segments
+
+    all_num_diffractions = np.array(list(num_diffractions.values()))
+    assert np.all(all_num_diffractions == 2)
 
 def test_diffuse_depth_high():
     """
@@ -736,11 +768,10 @@ def test_diffuse_depth_high():
     tracer = SBCandidateGenerator()
 
     paths = tracer(scene.mi_scene, sources, targets, samples_per_src, max_num_paths, max_depth,
-                   los=False, refraction=True, specular_reflection=True,
-                   diffuse_reflection=True, seed=1)
+                   los=False, refraction=False, specular_reflection=False,
+                   diffuse_reflection=True, diffraction=False, edge_diffraction=False, seed=1)
     paths.shrink()
 
-    primitives = paths.primitives.numpy()
     int_types = paths.interaction_types.numpy()
     valid = paths.valid.numpy()
 
@@ -774,7 +805,8 @@ def test_diffuse_depth_high():
 def test_diffuse_prefixes():
     """
     Check that, in the case of the box scene for which there is no occlusion,
-    all all prefixes are listed as valid paths
+    all all prefixes are listed as valid paths when there is only diffuse
+    reflections
     """
     # 2 sources
     sources = mi.Point3f([-3., -3],
@@ -798,7 +830,7 @@ def test_diffuse_prefixes():
 
     paths = tracer(scene.mi_scene, sources, targets, samples_per_src, max_num_paths, max_depth,
                    los=False, refraction=True, specular_reflection=True,
-                   diffuse_reflection=True, seed=1)
+                   diffuse_reflection=True, diffraction=True, edge_diffraction=True, seed=1)
     paths.shrink()
 
     primitives = paths.primitives.numpy()
@@ -806,7 +838,16 @@ def test_diffuse_prefixes():
     src_indices = paths.source_indices.numpy()
     tgt_indices = paths.target_indices.numpy()
 
-    # Test that all prefixes are listed as candidates
+    # All paths should be valid
+    assert np.all(paths.valid.numpy())
+
+    # All interaction types should be diffuse or None
+    assert np.all(np.logical_or(
+        np.equal(paths.interaction_types.numpy(), InteractionType.DIFFUSE),
+        np.equal(paths.interaction_types.numpy(), InteractionType.NONE)
+    ))
+
+    # Test that all prefixes are listed.
     # First, aggregate all interaction for each link
     link_interactions = {}
     for src_ind, tgt_ind, prim_ind in zip(src_indices, tgt_indices, primitives):
@@ -882,7 +923,7 @@ def test_diffuse_specular():
 
     paths = tracer(scene.mi_scene, sources, targets, samples_per_src, max_num_paths, max_depth,
                    los=False, refraction=True, specular_reflection=True,
-                   diffuse_reflection=True, seed=1)
+                   diffuse_reflection=True, diffraction=True, edge_diffraction=True, seed=1)
     paths.shrink()
 
     int_types = paths.interaction_types.numpy()
@@ -902,6 +943,7 @@ def test_diffuse_specular():
         bounce = np.logical_or(specular,diffuse)
 
         # The ray bounced or the interaction is none
+        # I.e., there should be no refraction or diffraction
         assert np.all(np.logical_or(bounce, no_int))
 
         # If paths is done, there should be only none interaction
@@ -947,38 +989,115 @@ def test_diffuse_specular():
         assert np.all(valid[diff_ind])
         assert np.all(np.logical_not(valid[spec_ind]))
 
+def test_edge_diffraction_flag():
+    """Test flag enabling/disabling edge diffraction
+    """
+    source = mi.Point3f(-3., -3., 3.5)
+    target = mi.Point3f(3., 3., 3.0)
+
+    max_depth = 4
+    samples_per_src = 10000
+    max_num_paths = 100000
+
+    scene = load_box_one_screen_scene("metal", 0.01, 1.0)
+    tracer = SBCandidateGenerator()
+
+    # Edge diffraction enabled
+    paths = tracer(scene.mi_scene, source, target, samples_per_src, max_num_paths, max_depth,
+                los=False, refraction=False, specular_reflection=False,
+                diffuse_reflection=True, diffraction=True, edge_diffraction=True, seed=1)
+    paths.shrink()
+    interactions = paths.interaction_types.numpy()
+
+    has_diffraction = np.any(np.equal(interactions, InteractionType.DIFFRACTION))
+    assert has_diffraction
+
+    # Edge diffraction disabled
+    paths = tracer(scene.mi_scene, source, target, samples_per_src, max_num_paths, max_depth,
+                los=False, refraction=False, specular_reflection=False,
+                diffuse_reflection=True, diffraction=True, edge_diffraction=False, seed=1)
+    paths.shrink()
+    interactions = paths.interaction_types.numpy()
+
+    has_diffraction = np.any(np.equal(interactions, InteractionType.DIFFRACTION))
+    assert not has_diffraction
+
+def test_no_diffuse_and_diffraction():
+    """Test that no path contains both diffuse and diffraction"""
+
+    # 2 sources
+    sources = mi.Point3f([4.],
+                        [1.],
+                        [2.])
+
+    # 3 targets
+    targets = mi.Point3f([-4.],
+                        [0.],
+                        [3.])
+    # 2x3 = 6 links
+
+    max_depth = 10
+    samples_per_src = int(1e4)
+    max_num_paths = int(1e6)
+
+    # Set material to metal which leads to all the energy being reflected
+    # Scattering coefficient set to 0
+    scene = load_box_box_two_screens_scene("metal", 0.01, scattering_coefficient=0.7)
+    tracer = SBCandidateGenerator()
+
+    paths = tracer(scene.mi_scene, sources, targets, samples_per_src, max_num_paths, max_depth,
+                    los=False, refraction=True, specular_reflection=True,
+                    diffuse_reflection=True, diffraction=True, edge_diffraction=True, seed=1)
+    paths.shrink()
+
+    int_types = paths.interaction_types.numpy()
+
+    has_diffraction = np.any(int_types == InteractionType.DIFFRACTION, axis=1)
+    has_diffuse = np.any(int_types == InteractionType.DIFFUSE, axis=1)
+
+    assert np.any(has_diffuse)
+    assert np.any(has_diffraction)
+    assert np.all(np.logical_not(np.logical_and(has_diffraction, has_diffuse)))
+
 @pytest.mark.parametrize("los", [True, False])
 @pytest.mark.parametrize("refraction", [True, False])
 @pytest.mark.parametrize("specular_reflection", [True, False])
 @pytest.mark.parametrize("diffuse_reflection", [True, False])
+@pytest.mark.parametrize("diffraction", [True, False])
 def test_intertaction_type_flags(los, refraction, specular_reflection,
-                                 diffuse_reflection):
+                                 diffuse_reflection, diffraction):
+    """
+    Test flags enabling/disabling interaction types
+    """
 
-    source = mi.Point3f(0., 0., 1.5)
-    target = mi.Point3f(1., 1., 1.)
+    source = mi.Point3f(-3., -3., 3.5)
+    target = mi.Point3f(3., 3., 3.0)
 
-    max_depth = 1
-    samples_per_src = 100
-    max_num_paths = 1000
+    max_depth = 4
+    samples_per_src = 1000
+    max_num_paths = 10000
 
-    scene = load_box_scene("glass", 0.01, 0.2)
+    scene = load_box_knife_scene("glass", 0.01, 0.7)
     tracer = SBCandidateGenerator()
 
     paths = tracer(scene.mi_scene, source, target, samples_per_src, max_num_paths, max_depth,
                 los=los, refraction=refraction, specular_reflection=specular_reflection,
-                diffuse_reflection=diffuse_reflection, seed=1)
+                diffuse_reflection=diffuse_reflection, diffraction=diffraction,
+                edge_diffraction=True, seed=1)
     paths.shrink()
     interactions = paths.interaction_types.numpy()
-    interactions = np.squeeze(interactions)
 
-    has_los = InteractionType.NONE in interactions
+    has_los = np.any(np.all(np.equal(interactions, InteractionType.NONE), axis=1))
     assert np.logical_not(np.bitwise_xor(los, has_los))
 
-    has_specular = InteractionType.SPECULAR in interactions
+    has_specular = np.any(np.equal(interactions, InteractionType.SPECULAR))
     assert np.logical_not(np.bitwise_xor(specular_reflection, has_specular))
 
-    has_refraction = InteractionType.REFRACTION in interactions
+    has_refraction = np.any(np.equal(interactions, InteractionType.REFRACTION))
     assert np.logical_not(np.bitwise_xor(refraction, has_refraction))
 
-    has_diffuse = InteractionType.DIFFUSE in interactions
+    has_diffuse = np.any(np.equal(interactions, InteractionType.DIFFUSE))
     assert np.logical_not(np.bitwise_xor(diffuse_reflection, has_diffuse))
+
+    has_diffraction = np.any(np.equal(interactions, InteractionType.DIFFRACTION))
+    assert np.logical_not(np.bitwise_xor(diffraction, has_diffraction))
